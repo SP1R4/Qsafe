@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">Qsafe 2.0</h1>
+  <h1 align="center">Qsafe</h1>
   <p align="center">
     Post-quantum file encryption built for the future.
     <br />
@@ -18,7 +18,7 @@
 
 ## Overview
 
-Qsafe 2.0 is a command-line file encryption tool that combines **post-quantum key encapsulation** with **classical symmetric encryption** to provide long-term data confidentiality against both classical and quantum adversaries.
+Qsafe is a command-line file encryption tool that combines **post-quantum key encapsulation** with **classical symmetric encryption** to provide long-term data confidentiality against both classical and quantum adversaries.
 
 It uses **CRYSTALS-Kyber (ML-KEM-1024)** for key encapsulation and **AES-256-GCM** for authenticated encryption, with **HKDF-SHA256** for key derivation. Secret keys are protected by a user-supplied passphrase.
 
@@ -155,7 +155,7 @@ make -j$(nproc)
 sudo make install && sudo ldconfig
 cd ../..
 
-# Build Qsafe 2.0
+# Build Qsafe 
 make
 ```
 
@@ -309,7 +309,7 @@ Offset       Size          Field
 ## Project Structure
 
 ```
-Qsafe2.0/
+Qsafe/
 ├── src/
 │   ├── main.c                 # CLI interface and argument parsing
 │   └── crypto_utils.c         # Core cryptographic operations
