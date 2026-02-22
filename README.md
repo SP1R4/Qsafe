@@ -1,4 +1,4 @@
-# Qsafe 2.0
+# Qsafe
 
 A post-quantum file encryption CLI tool using **Kyber1024** (CRYSTALS-Kyber KEM) and **AES-256-GCM**, designed to protect data against both classical and quantum computer attacks.
 
