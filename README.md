@@ -1,156 +1,139 @@
-# Qsafe
+<p align="center">
+  <h1 align="center">Qsafe 2.0</h1>
+  <p align="center">
+    Post-quantum file encryption built for the future.
+    <br />
+    <strong>Kyber1024 (ML-KEM) + AES-256-GCM + HKDF-SHA256</strong>
+  </p>
+</p>
 
-A post-quantum file encryption CLI tool using **Kyber1024** (CRYSTALS-Kyber KEM) and **AES-256-GCM**, designed to protect data against both classical and quantum computer attacks.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/NIST-PQC%20Level%205-orange" alt="NIST PQC Level 5">
+  <img src="https://img.shields.io/badge/language-C-lightgrey" alt="C">
+</p>
+
+---
+
+## Overview
+
+Qsafe 2.0 is a command-line file encryption tool that combines **post-quantum key encapsulation** with **classical symmetric encryption** to provide long-term data confidentiality against both classical and quantum adversaries.
+
+It uses **CRYSTALS-Kyber (ML-KEM-1024)** for key encapsulation and **AES-256-GCM** for authenticated encryption, with **HKDF-SHA256** for key derivation. Secret keys are protected by a user-supplied passphrase.
+
+### Key Features
+
+- **Quantum-resistant** -- NIST FIPS 203 compliant Kyber1024 at security Level 5
+- **Authenticated encryption** -- AES-256-GCM ensures both confidentiality and integrity
+- **Streaming architecture** -- constant memory usage via 4 KB chunked I/O
+- **Passphrase-protected keys** -- Kyber secret keys encrypted at rest with HKDF-derived keys
+- **Batch processing** -- encrypt or decrypt entire directories in a single command
+- **Tamper detection** -- GCM authentication tags reject any modified ciphertext
 
 ---
 
 ## Table of Contents
 
-- [How It Works](#how-it-works)
-  - [Encryption Process](#encryption-process)
-  - [Decryption Process](#decryption-process)
-  - [Encrypted File Format](#encrypted-file-format)
-  - [Secret Key Storage Format](#secret-key-storage-format)
-  - [Cryptographic Primitives](#cryptographic-primitives)
-- [Dependencies](#dependencies)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [Command Syntax](#command-syntax)
-  - [Options Reference](#options-reference)
-  - [Encrypting a Single File](#encrypting-a-single-file)
-  - [Decrypting a Single File](#decrypting-a-single-file)
-  - [Encrypting a Directory](#encrypting-a-directory)
-  - [Decrypting a Directory](#decrypting-a-directory)
-  - [Using Custom Key Files](#using-custom-key-files)
-  - [Verbose Mode](#verbose-mode)
+- [File Formats](#file-formats)
 - [Key Management](#key-management)
+- [Security Model](#security-model)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
 - [License](#license)
 
 ---
 
-## How It Works
-
-Qsafe 2.0 uses a **hybrid encryption scheme** that combines post-quantum key encapsulation with classical symmetric encryption. This means your data is protected even if large-scale quantum computers become available in the future.
-
-### Encryption Process
-
-```
-Step 1: Key Generation
-  User passphrase ──► HKDF-SHA256 ──► Passphrase-derived key (32 bytes)
-  Kyber1024 ──► Public key + Secret key (3168 bytes)
-  Secret key ──► AES-256-GCM encrypt with passphrase key ──► secret_key.bin
-
-Step 2: File Encryption
-  Public key ──► Kyber encapsulation ──► KEM ciphertext (1568 bytes) + Shared secret (32 bytes)
-  Shared secret ──► HKDF-SHA256 ──► AES key (32 bytes)
-  Random ──► Nonce (12 bytes)
-  Plaintext file ──► AES-256-GCM encrypt (streaming, 4KB chunks) ──► Ciphertext
-
-Step 3: Output Assembly
-  Write to output: [Version header] [KEM ciphertext] [AES ciphertext] [Nonce] [GCM Tag]
-```
-
-**Detailed walkthrough:**
-
-1. **Kyber keypair generation** - A fresh Kyber1024 keypair (public key + 3168-byte secret key) is generated using liboqs. The secret key is encrypted with a key derived from your passphrase via HKDF-SHA256 and stored in `secret_key.bin`.
-
-2. **Key encapsulation** - The Kyber public key is used to perform KEM encapsulation, producing a 1568-byte KEM ciphertext and a 32-byte shared secret. Only the holder of the Kyber secret key can recover this shared secret.
-
-3. **AES key derivation** - The 32-byte Kyber shared secret is passed through HKDF-SHA256 to derive a 256-bit AES key. A random 12-byte nonce is generated via OpenSSL's `RAND_bytes`.
-
-4. **Streaming encryption** - The input file is read in 4KB chunks and encrypted with AES-256-GCM. Each chunk is immediately written to the output file, keeping memory usage constant regardless of file size.
-
-5. **Authentication** - After all chunks are processed, AES-GCM produces a 16-byte authentication tag. This tag is appended to the output along with the nonce, ensuring any tampering is detected during decryption.
-
-### Decryption Process
-
-```
-Step 1: Key Recovery
-  secret_key.bin ──► AES-256-GCM decrypt with passphrase key ──► Kyber secret key
-
-Step 2: File Parsing
-  Encrypted file ──► Parse [Header] [KEM ciphertext] [AES ciphertext] [Nonce] [Tag]
-
-Step 3: Key Decapsulation
-  KEM ciphertext + Kyber secret key ──► Kyber decapsulation ──► Shared secret
-  Shared secret ──► HKDF-SHA256 ──► AES key (32 bytes)
-
-Step 4: File Decryption
-  AES ciphertext ──► AES-256-GCM decrypt (streaming, 4KB chunks) ──► Plaintext
-  Verify GCM tag ──► Authentication check (reject if tampered)
-```
-
-**Detailed walkthrough:**
-
-1. **Secret key recovery** - The encrypted secret key is loaded from `secret_key.bin`, and the passphrase-derived key is used to decrypt it via AES-256-GCM. If the passphrase is wrong or the key file is corrupted, authentication fails and decryption is refused.
-
-2. **File format validation** - The encrypted file is opened and validated: the `CRYPTOv2` version header is checked, and the file size is verified to contain at least the header + KEM ciphertext + nonce + tag.
-
-3. **Key decapsulation** - The KEM ciphertext is extracted and passed to Kyber decapsulation along with the secret key, recovering the original 32-byte shared secret. HKDF-SHA256 derives the same AES key used during encryption.
-
-4. **Streaming decryption** - The AES ciphertext is decrypted in 4KB chunks and written to the output file. After all chunks are processed, the GCM authentication tag is verified. If verification fails (file was tampered with), the operation fails with an integrity error.
-
-### Encrypted File Format
-
-```
-Offset    Size        Field
-──────    ──────────  ─────────────────────────────────
-0         8 bytes     Version header ("CRYPTOv2")
-8         1568 bytes  Kyber1024 KEM ciphertext
-1576      variable    AES-256-GCM encrypted data
-EOF-28    12 bytes    AES-GCM nonce (IV)
-EOF-16    16 bytes    AES-GCM authentication tag
-```
-
-- **Total overhead per file**: 1604 bytes (header + KEM ciphertext + nonce + tag)
-- The encrypted file is always exactly `original_size + 1604` bytes
-
-### Secret Key Storage Format
-
-The `secret_key.bin` file stores the Kyber secret key encrypted with the user's passphrase:
-
-```
-Offset    Size        Field
-──────    ──────────  ─────────────────────────────────
-0         12 bytes    AES-GCM nonce
-12        3168 bytes  Encrypted Kyber1024 secret key
-3180      16 bytes    AES-GCM authentication tag
-```
-
-- **Total file size**: 3196 bytes (always fixed for Kyber1024)
+## Architecture
 
 ### Cryptographic Primitives
 
-| Component | Algorithm | Purpose | Security Level |
-|---|---|---|---|
-| Key Encapsulation | Kyber1024 (ML-KEM-1024) | Post-quantum key exchange | NIST Level 5 (equivalent to AES-256) |
-| Symmetric Encryption | AES-256-GCM | Authenticated encryption | 256-bit |
-| Key Derivation | HKDF-SHA256 | Derive AES key from shared secret | 256-bit |
-| Random Generation | OpenSSL RAND_bytes | Nonce and key generation | CSPRNG |
+| Component | Algorithm | Specification | Security Level |
+|:--|:--|:--|:--|
+| Key Encapsulation | Kyber1024 (ML-KEM-1024) | NIST FIPS 203 | Level 5 (AES-256 equivalent) |
+| Symmetric Encryption | AES-256-GCM | NIST SP 800-38D | 256-bit |
+| Key Derivation | HKDF-SHA256 | RFC 5869 | 256-bit |
+| Random Generation | OpenSSL `RAND_bytes` | CSPRNG | System entropy |
 
-**Why Kyber1024?** Kyber is the NIST-selected post-quantum KEM standard (FIPS 203 / ML-KEM). The 1024 parameter set provides the highest security level (Level 5), offering protection equivalent to AES-256 against both classical and quantum attacks.
+### Encryption Flow
 
-**Why AES-256-GCM?** GCM mode provides both confidentiality (encryption) and integrity (authentication) in a single pass. The 16-byte authentication tag ensures any modification to the ciphertext, header, or KEM data is detected.
+```
+                        +-----------------+
+                        |   Passphrase    |
+                        +--------+--------+
+                                 |
+                            HKDF-SHA256
+                                 |
+                                 v
++-------------+         +-------+--------+         +----------------+
+| Kyber1024   |-------->| Secret Key     |-------->| secret_key.bin |
+| Keypair Gen |         | (AES-GCM wrap) |         | (encrypted)    |
++------+------+         +----------------+         +----------------+
+       |
+       | Public Key
+       v
++------+------+         +----------------+         +----------------+
+| KEM         |-------->| Shared Secret  |--HKDF-->| AES-256 Key    |
+| Encapsulate |         | (32 bytes)     |         | (32 bytes)     |
++------+------+         +----------------+         +-------+--------+
+       |                                                    |
+       | KEM Ciphertext                                     v
+       |                                            +-------+--------+
+       |                                            | AES-256-GCM    |
+       |                                            | Encrypt        |
+       |                                            | (4 KB chunks)  |
+       |                                            +-------+--------+
+       |                                                    |
+       v                                                    v
++------+----------------------------------------------------+------+
+| CRYPTOv2 | KEM Ciphertext (1568 B) | AES Ciphertext | Nonce | Tag |
++-----------+-------------------------+----------------+-------+-----+
+```
+
+### Decryption Flow
+
+```
+secret_key.bin + Passphrase --> HKDF --> AES-GCM Decrypt --> Kyber Secret Key
+                                                                    |
+Encrypted File --> Parse Header --> KEM Ciphertext -----------------+
+                                                                    |
+                                              Kyber Decapsulate <---+
+                                                      |
+                                                Shared Secret
+                                                      |
+                                                 HKDF-SHA256
+                                                      |
+                                                 AES-256 Key
+                                                      |
+                                   AES-GCM Decrypt (4 KB chunks)
+                                                      |
+                                              Verify GCM Tag
+                                                      |
+                                                  Plaintext
+```
 
 ---
 
-## Dependencies
+## Requirements
 
-| Dependency | Version | Purpose |
-|---|---|---|
-| GCC | any recent | C compiler |
-| Make | any | Build system |
-| CMake | 3.x+ | Build liboqs |
-| OpenSSL | 3.x | AES-256-GCM, HKDF, CSPRNG |
-| liboqs | latest | Kyber1024 KEM implementation |
+| Dependency | Minimum Version | Purpose |
+|:--|:--|:--|
+| GCC | 7+ | C compiler |
+| GNU Make | 3.81+ | Build system |
+| CMake | 3.0+ | Build liboqs |
+| OpenSSL | 3.0+ | AES-256-GCM, HKDF, CSPRNG |
+| [liboqs](https://github.com/open-quantum-safe/liboqs) | 0.8+ | Kyber1024 KEM implementation |
 
 ---
 
 ## Installation
 
-### Quick Setup (Ubuntu/Debian)
+### Automated (Ubuntu/Debian)
 
 ```bash
 chmod +x scripts/setup.sh
@@ -158,174 +141,168 @@ chmod +x scripts/setup.sh
 make
 ```
 
-### Manual Setup
+### Manual
 
 ```bash
-# 1. Install build tools and OpenSSL development headers
-sudo apt update
-sudo apt install -y build-essential libssl-dev cmake
+# Install build dependencies
+sudo apt update && sudo apt install -y build-essential libssl-dev cmake
 
-# 2. Build and install liboqs
+# Build and install liboqs
 git clone https://github.com/open-quantum-safe/liboqs.git
-cd liboqs
-mkdir build && cd build
+cd liboqs && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
-sudo make install
-sudo ldconfig
+sudo make install && sudo ldconfig
 cd ../..
 
-# 3. Build Qsafe 2.0
+# Build Qsafe 2.0
 make
 ```
 
-After building, the `crypto-v2` executable is ready in the project root.
+The `crypto-v2` binary will be placed in the project root.
+
+### Verify Installation
+
+```bash
+./crypto-v2 --help
+```
 
 ---
 
 ## Usage
 
-### Command Syntax
+### Synopsis
 
 ```
-./crypto-v2 [options] <operation> <input_path> <output_path> <type>
+./crypto-v2 [OPTIONS] <encrypt|decrypt> <input> <output> <file|dir>
 ```
 
-| Argument | Values | Description |
-|---|---|---|
-| `operation` | `encrypt` or `decrypt` | What to do |
-| `input_path` | file or directory path | Source data |
-| `output_path` | file or directory path | Destination |
-| `type` | `file` or `dir` | Whether input is a single file or directory |
+### Options
 
-### Options Reference
+| Option | Description |
+|:--|:--|
+| `--passphrase <str>` | **(Required)** Passphrase to protect the Kyber secret key |
+| `--key-file <path>` | Path to the secret key file (default: `secret_key.bin`) |
+| `--verbose` | Print detailed cryptographic information |
+| `--force` | Overwrite output files without confirmation |
+| `--help` | Display usage information |
 
-| Option | Required | Default | Description |
-|---|---|---|---|
-| `--passphrase <str>` | Yes | none | Passphrase to protect the Kyber secret key |
-| `--key-file <path>` | No | `secret_key.bin` | Path to the secret key file |
-| `--verbose` | No | off | Print detailed info (key hex, chunk sizes, file sizes) |
-| `--force` | No | off | Overwrite output files without prompting |
-| `--help` | No | - | Show usage and exit |
+> Options must precede the positional arguments.
 
-**Important**: Options must come **before** the operation argument.
+### Examples
 
-### Encrypting a Single File
+**Encrypt a file:**
 
 ```bash
-./crypto-v2 --passphrase "my-secret-pass" encrypt plaintext.txt encrypted.bin file
+./crypto-v2 --passphrase "strong-passphrase" encrypt document.pdf document.pdf.enc file
 ```
 
-**What happens:**
-1. A new Kyber1024 keypair is generated
-2. The secret key is encrypted with your passphrase and saved to `secret_key.bin`
-3. `plaintext.txt` is encrypted and written to `encrypted.bin`
-4. A progress bar shows encryption progress
-
-**Output files:**
-- `encrypted.bin` - your encrypted file
-- `secret_key.bin` - encrypted Kyber secret key (keep this safe!)
-
-### Decrypting a Single File
+**Decrypt a file:**
 
 ```bash
-./crypto-v2 --passphrase "my-secret-pass" decrypt encrypted.bin decrypted.txt file
+./crypto-v2 --passphrase "strong-passphrase" decrypt document.pdf.enc document.pdf file
 ```
 
-**What happens:**
-1. The secret key is loaded from `secret_key.bin` and decrypted with your passphrase
-2. The KEM ciphertext is decapsulated to recover the shared secret
-3. The AES key is re-derived and the file is decrypted
-4. The GCM tag is verified to ensure the file hasn't been tampered with
-
-**Requirements:**
-- The `secret_key.bin` file from the encryption step must be present
-- The same passphrase used during encryption must be provided
-- The encrypted file must not have been modified (integrity check)
-
-### Encrypting a Directory
+**Encrypt a directory:**
 
 ```bash
-./crypto-v2 --passphrase "my-secret-pass" encrypt ./documents/ ./documents_enc/ dir
+./crypto-v2 --passphrase "strong-passphrase" encrypt ./sensitive/ ./encrypted/ dir
 ```
 
-**What happens:**
-- Each regular file in `./documents/` is individually encrypted
-- Encrypted files are written to `./documents_enc/` (created if it doesn't exist)
-- File names are preserved (but contents are encrypted)
-- A single `secret_key.bin` is generated for the entire batch
-
-**Note:** Only top-level files are processed. Subdirectories are skipped.
-
-### Decrypting a Directory
+**Decrypt a directory:**
 
 ```bash
-./crypto-v2 --passphrase "my-secret-pass" decrypt ./documents_enc/ ./documents_dec/ dir
+./crypto-v2 --passphrase "strong-passphrase" decrypt ./encrypted/ ./decrypted/ dir
 ```
 
-Each encrypted file in the directory is decrypted and written to the output directory.
-
-### Using Custom Key Files
-
-Use `--key-file` to specify a custom path for the secret key. This is useful when managing multiple encryption projects:
+**Custom key file:**
 
 ```bash
-# Encrypt with a project-specific key
-./crypto-v2 --key-file project_a.key --passphrase "pass-a" encrypt data.csv data.csv.enc file
-
-# Decrypt with the same key
-./crypto-v2 --key-file project_a.key --passphrase "pass-a" decrypt data.csv.enc data.csv file
+./crypto-v2 --key-file project.key --passphrase "pass" encrypt data.csv data.csv.enc file
+./crypto-v2 --key-file project.key --passphrase "pass" decrypt data.csv.enc data.csv file
 ```
 
-### Verbose Mode
-
-Use `--verbose` to see detailed cryptographic information during operation:
+**Verbose output:**
 
 ```bash
-./crypto-v2 --verbose --passphrase "my-pass" encrypt file.txt file.enc file
+./crypto-v2 --verbose --passphrase "pass" encrypt file.txt file.enc file
 ```
 
-Verbose output includes:
-- Operation parameters (input, output, type, key file path)
-- AES key and nonce in hexadecimal
-- Encrypted/decrypted chunk sizes
-- File size and KEM ciphertext length (during decryption)
+---
+
+## File Formats
+
+### Encrypted File
+
+```
+Offset       Size          Field
+-----------  ------------  ----------------------------
+0x0000       8 bytes       Version header ("CRYPTOv2")
+0x0008       1568 bytes    Kyber1024 KEM ciphertext
+0x0628       variable      AES-256-GCM ciphertext
+EOF - 28     12 bytes      GCM nonce (IV)
+EOF - 16     16 bytes      GCM authentication tag
+```
+
+**Per-file overhead:** 1604 bytes (8 + 1568 + 12 + 16)
+
+### Secret Key File (`secret_key.bin`)
+
+```
+Offset       Size          Field
+-----------  ------------  ----------------------------
+0x0000       12 bytes      AES-GCM nonce
+0x000C       3168 bytes    Encrypted Kyber1024 secret key
+0x0C6C       16 bytes      AES-GCM authentication tag
+```
+
+**Fixed size:** 3196 bytes
 
 ---
 
 ## Key Management
 
-### What Gets Generated
+### Generated Artifacts
 
-| File | Size | Contents | When Created |
-|---|---|---|---|
-| `secret_key.bin` | 3196 bytes | Encrypted Kyber1024 secret key | During encryption |
-| `*.enc` (output) | input + 1604 bytes | Encrypted data with KEM ciphertext | During encryption |
-
-### Security Model
-
-- **If you lose `secret_key.bin`**: Your encrypted files are **permanently unrecoverable**. There is no backdoor.
-- **If you forget the passphrase**: The secret key cannot be decrypted. Files are **permanently unrecoverable**.
-- **If an encrypted file is modified**: Decryption will fail with an integrity error (GCM tag mismatch).
-- **If an attacker has the encrypted file but not the key**: They cannot decrypt it, even with a quantum computer (Kyber1024 is quantum-resistant).
+| File | Size | Contents |
+|:--|:--|:--|
+| `secret_key.bin` | 3196 bytes | Passphrase-encrypted Kyber1024 secret key |
+| `<output>.enc` | input size + 1604 bytes | KEM ciphertext + AES-GCM encrypted data |
 
 ### Best Practices
 
-1. **Use a strong passphrase** - The passphrase protects the Kyber secret key. Choose something long and unique.
-2. **Restrict key file permissions**:
+1. **Use a strong passphrase** -- the passphrase is the sole protection for the Kyber secret key at rest.
+2. **Restrict key file permissions:**
    ```bash
    chmod 600 secret_key.bin
    ```
-3. **Back up the key file** - Store it separately from encrypted data:
+3. **Back up key files separately from encrypted data:**
    ```bash
-   cp secret_key.bin /secure-backup/project_key.bin
+   cp secret_key.bin /secure-backup/
    ```
-4. **Use separate key files per project**:
+4. **Use dedicated key files per project:**
    ```bash
-   ./crypto-v2 --key-file project1.key --passphrase "pass1" encrypt ...
-   ./crypto-v2 --key-file project2.key --passphrase "pass2" encrypt ...
+   ./crypto-v2 --key-file project_a.key --passphrase "pass-a" encrypt ...
+   ./crypto-v2 --key-file project_b.key --passphrase "pass-b" encrypt ...
    ```
-5. **Rotate keys periodically** - Re-encrypt data with fresh keypairs for long-term storage.
+5. **Rotate keys periodically** -- re-encrypt data with fresh keypairs for long-term storage.
+
+---
+
+## Security Model
+
+| Threat | Mitigation |
+|:--|:--|
+| Quantum key recovery | Kyber1024 (NIST Level 5) is resistant to known quantum algorithms |
+| Ciphertext tampering | AES-256-GCM authentication tag rejects any modification |
+| Key file compromise without passphrase | Secret key is AES-GCM encrypted with HKDF-derived key |
+| Memory exposure | All key material is zeroed (`memset`) before deallocation |
+
+### Failure Modes
+
+- **Lost `secret_key.bin`** -- encrypted files are permanently unrecoverable. There is no backdoor.
+- **Forgotten passphrase** -- the secret key cannot be decrypted. Data is permanently lost.
+- **Modified ciphertext** -- decryption fails with an integrity error (GCM tag mismatch).
 
 ---
 
@@ -334,32 +311,23 @@ Verbose output includes:
 ```
 Qsafe2.0/
 ├── src/
-│   ├── main.c              # CLI entry point, argument parsing, orchestration
-│   └── crypto_utils.c      # Core cryptographic operations (KEM, AES, HKDF)
+│   ├── main.c                 # CLI interface and argument parsing
+│   └── crypto_utils.c         # Core cryptographic operations
 ├── include/
-│   └── crypto_utils.h      # Public API, constants, error codes, config struct
+│   └── crypto_utils.h         # Public API, constants, and type definitions
+├── tests/
+│   ├── test_crypto_utils.c    # Unit tests
+│   └── test.sh                # End-to-end integration tests
 ├── scripts/
-│   └── setup.sh            # Automated dependency installer (Ubuntu/Debian)
+│   └── setup.sh               # Dependency installer (Ubuntu/Debian)
 ├── docs/
-│   ├── ReadMe.md           # Extended documentation
-│   └── encryption_flow.md  # Mermaid flow diagram of the encryption pipeline
-├── Makefile                # Build configuration (gcc, linking flags)
-├── LICENCE.txt             # MIT License
-└── README.md               # This file
+│   ├── ReadMe.md              # Extended documentation
+│   └── encryption_flow.md     # Encryption pipeline diagram
+├── Makefile                   # Build configuration
+├── .gitignore                 # Git ignore rules
+├── LICENSE                    # MIT License
+└── README.md                  # This file
 ```
-
-### Source Code Overview
-
-**`crypto_utils.h`** - Defines all constants, the `crypto_error_t` enum (6 error codes), the `crypto_config_t` struct, and function prototypes.
-
-**`main.c`** (172 lines) - Handles CLI argument parsing, initializes the Kyber KEM, manages the keypair lifecycle (generate on encrypt, load on decrypt), dispatches to file or directory processing, and performs secure cleanup.
-
-**`crypto_utils.c`** (664 lines) - Implements:
-- `crypto_derive_aes_key()` - HKDF-SHA256 key derivation
-- `crypto_save_secret_key()` / `crypto_load_secret_key()` - Passphrase-protected key storage
-- `crypto_encrypt_file()` / `crypto_decrypt_file()` - Streaming AES-256-GCM with Kyber KEM
-- `crypto_process_directory()` - Directory traversal and batch processing
-- `crypto_print_progress_bar()` - Visual progress indicator
 
 ---
 
@@ -369,10 +337,10 @@ Qsafe2.0/
 make test
 ```
 
-This runs the integration test suite including unit tests (`test_crypto_utils.c`) and end-to-end tests (`test.sh`).
+Runs the full test suite including unit tests and end-to-end encryption/decryption verification.
 
 ---
 
 ## License
 
-MIT License. See [LICENCE.txt](LICENCE.txt).
+Released under the [MIT License](LICENSE).

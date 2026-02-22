@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+crypto
+crypto-v2
+tests/test_crypto
+
+# Dependencies
+liboqs/
+
+# Secrets
+secret_key.bin
+*.bin
+*.key
+*.pem
+
+# Claude Code
+.claude/
