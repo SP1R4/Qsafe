@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev cmake ninja-build
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: liboqs-install
+          key: liboqs-0.12.0-${{ runner.os }}
+
+      - name: Build liboqs
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Install liboqs
+        run: |
+          sudo cp -r liboqs-install/include/* /usr/local/include/
+          sudo cp -r liboqs-install/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Build
+        run: make
+
+      - name: Run tests
+        run: make test

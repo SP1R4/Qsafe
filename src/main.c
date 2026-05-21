@@ -7,7 +7,7 @@
 #include "crypto_utils.h"
 
 #define PROGRAM_NAME "crypto-v2"
-#define VERSION "2.0.0"
+#define VERSION "3.0.0"
 
 static void print_usage(const char *program_name) {
     printf("%s v%s - Post-Quantum File Encryption Tool\n", program_name, VERSION);
@@ -95,9 +95,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_kyber_1024);
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_1024);
     if (kem == NULL) {
-        fprintf(stderr, "Error: Failed to initialize Kyber\n");
+        fprintf(stderr, "Error: Failed to initialize ML-KEM-1024\n");
         return 1;
     }
 
@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
             goto cleanup;
         }
         if (OQS_KEM_keypair(kem, public_key, secret_key) != OQS_SUCCESS) {
-            fprintf(stderr, "Error: Failed to generate Kyber keypair\n");
+            fprintf(stderr, "Error: Failed to generate ML-KEM keypair\n");
             goto cleanup;
         }
         if (crypto_save_secret_key(config.secret_key_file, secret_key, kem->length_secret_key, &config) != CRYPTO_SUCCESS) {

@@ -1,12 +1,16 @@
 CC = gcc
-CFLAGS = -Iinclude -Wall -O2
+CFLAGS = -Iinclude -std=c11 -Wall -Wextra -Wformat -Wformat-security -O2 \
+         -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 LDFLAGS = -L/usr/local/lib -loqs -lssl -lcrypto
+
 SRC_DIR = src
 INCLUDE_DIR = include
 TEST_DIR = tests
+
 SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = crypto-v2
+
 TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
 TEST_EXECUTABLE = $(TEST_DIR)/test_crypto
@@ -19,7 +23,7 @@ $(EXECUTABLE): $(OBJECTS)
 $(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(TEST_EXECUTABLE)
+test: $(EXECUTABLE) $(TEST_EXECUTABLE)
 	$(TEST_DIR)/test_crypto
 	$(TEST_DIR)/test.sh
 

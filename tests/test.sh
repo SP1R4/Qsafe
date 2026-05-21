@@ -1,5 +1,5 @@
 #!/bin/bash
-# Qsafe 2.0 - End-to-end integration tests
+# Qsafe 3.0 - End-to-end integration tests
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -28,83 +28,99 @@ fail() {
     echo "  FAIL: $1"
 }
 
-echo ""
-echo "=== Qsafe 2.0 Integration Tests ==="
+# check <description> : passes if the following command succeeds
+check_ok() {
+    local desc="$1"; shift
+    if "$@" > /dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
+}
 
-# Check binary exists
+# check_fail <description> : passes if the following command fails
+check_fail() {
+    local desc="$1"; shift
+    if "$@" > /dev/null 2>&1; then fail "$desc"; else pass "$desc"; fi
+}
+
+echo ""
+echo "=== Qsafe 3.0 Integration Tests ==="
+
 if [ ! -x "$BINARY" ]; then
     echo "ERROR: $BINARY not found or not executable"
     exit 1
 fi
 
-# --- Test 1: Encrypt and decrypt a single file ---
+# --- Test 1: file encrypt/decrypt round-trip ---
 echo ""
 echo "[test: file encrypt/decrypt round-trip]"
 echo "Hello, Qsafe integration test!" > "$TMPDIR/test_input.txt"
 
-if "$BINARY" --key-file "$KEYFILE" --passphrase "$PASS" encrypt "$TMPDIR/test_input.txt" "$TMPDIR/test_input.enc" file > /dev/null 2>&1; then
-    pass "encrypt file succeeds"
-else
-    fail "encrypt file succeeds"
-fi
+check_ok "encrypt file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    encrypt "$TMPDIR/test_input.txt" "$TMPDIR/test_input.enc" file
+check_ok "decrypt file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    decrypt "$TMPDIR/test_input.enc" "$TMPDIR/test_output.txt" file
+check_ok "decrypted file matches original" \
+    diff -q "$TMPDIR/test_input.txt" "$TMPDIR/test_output.txt"
 
-if "$BINARY" --key-file "$KEYFILE" --passphrase "$PASS" decrypt "$TMPDIR/test_input.enc" "$TMPDIR/test_output.txt" file > /dev/null 2>&1; then
-    pass "decrypt file succeeds"
-else
-    fail "decrypt file succeeds"
-fi
+# --- Test 2: empty file round-trip ---
+echo ""
+echo "[test: empty file round-trip]"
+: > "$TMPDIR/empty.txt"
+check_ok "encrypt empty file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    encrypt "$TMPDIR/empty.txt" "$TMPDIR/empty.enc" file
+check_ok "decrypt empty file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    decrypt "$TMPDIR/empty.enc" "$TMPDIR/empty.out" file
+check_ok "decrypted empty file matches original" \
+    diff -q "$TMPDIR/empty.txt" "$TMPDIR/empty.out"
 
-if diff -q "$TMPDIR/test_input.txt" "$TMPDIR/test_output.txt" > /dev/null 2>&1; then
-    pass "decrypted file matches original"
-else
-    fail "decrypted file matches original"
-fi
+# --- Test 3: large multi-chunk file round-trip (streaming) ---
+echo ""
+echo "[test: large file round-trip]"
+dd if=/dev/urandom of="$TMPDIR/large.bin" bs=1024 count=2048 > /dev/null 2>&1
+check_ok "encrypt 2 MiB file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    encrypt "$TMPDIR/large.bin" "$TMPDIR/large.enc" file
+check_ok "decrypt 2 MiB file succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    decrypt "$TMPDIR/large.enc" "$TMPDIR/large.out" file
+check_ok "decrypted large file matches original" \
+    cmp -s "$TMPDIR/large.bin" "$TMPDIR/large.out"
 
-# --- Test 2: Encrypt and decrypt a directory ---
+# --- Test 4: directory encrypt/decrypt round-trip ---
 echo ""
 echo "[test: directory encrypt/decrypt round-trip]"
-mkdir -p "$TMPDIR/input_dir"
+mkdir -p "$TMPDIR/input_dir/sub"
 echo "File A content" > "$TMPDIR/input_dir/a.txt"
 echo "File B content" > "$TMPDIR/input_dir/b.txt"
+echo "Nested file"    > "$TMPDIR/input_dir/sub/c.txt"
 
-if "$BINARY" --key-file "$KEYFILE" --passphrase "$PASS" encrypt "$TMPDIR/input_dir" "$TMPDIR/encrypted_dir" dir > /dev/null 2>&1; then
-    pass "encrypt directory succeeds"
-else
-    fail "encrypt directory succeeds"
-fi
+check_ok "encrypt directory succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    encrypt "$TMPDIR/input_dir" "$TMPDIR/encrypted_dir" dir
+check_ok "decrypt directory succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    decrypt "$TMPDIR/encrypted_dir" "$TMPDIR/decrypted_dir" dir
+check_ok "decrypted dir file a.txt matches" \
+    diff -q "$TMPDIR/input_dir/a.txt" "$TMPDIR/decrypted_dir/a.txt"
+check_ok "decrypted dir file b.txt matches" \
+    diff -q "$TMPDIR/input_dir/b.txt" "$TMPDIR/decrypted_dir/b.txt"
+check_ok "decrypted nested file sub/c.txt matches (recursive)" \
+    diff -q "$TMPDIR/input_dir/sub/c.txt" "$TMPDIR/decrypted_dir/sub/c.txt"
 
-if "$BINARY" --key-file "$KEYFILE" --passphrase "$PASS" decrypt "$TMPDIR/encrypted_dir" "$TMPDIR/decrypted_dir" dir > /dev/null 2>&1; then
-    pass "decrypt directory succeeds"
-else
-    fail "decrypt directory succeeds"
-fi
-
-if diff -q "$TMPDIR/input_dir/a.txt" "$TMPDIR/decrypted_dir/a.txt" > /dev/null 2>&1; then
-    pass "decrypted dir file a.txt matches"
-else
-    fail "decrypted dir file a.txt matches"
-fi
-
-if diff -q "$TMPDIR/input_dir/b.txt" "$TMPDIR/decrypted_dir/b.txt" > /dev/null 2>&1; then
-    pass "decrypted dir file b.txt matches"
-else
-    fail "decrypted dir file b.txt matches"
-fi
-
-# --- Test 3: Wrong passphrase fails ---
+# --- Test 5: wrong passphrase rejection ---
 echo ""
 echo "[test: wrong passphrase rejection]"
-if "$BINARY" --key-file "$KEYFILE" --passphrase "wrong-pass" decrypt "$TMPDIR/test_input.enc" "$TMPDIR/wrong_pass_out.txt" file > /dev/null 2>&1; then
-    fail "wrong passphrase rejects decryption"
-else
-    pass "wrong passphrase rejects decryption"
-fi
+check_fail "wrong passphrase rejects decryption" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "wrong-pass" \
+    decrypt "$TMPDIR/test_input.enc" "$TMPDIR/wrong_pass_out.txt" file
 
-# --- Test 4: Tampered ciphertext fails ---
+# --- Test 6: tampered ciphertext rejection ---
 echo ""
 echo "[test: tampered ciphertext rejection]"
 cp "$TMPDIR/test_input.enc" "$TMPDIR/tampered.enc"
-# Flip a byte in the AES ciphertext area (past header + KEM ciphertext)
+# Flip a byte in the AES ciphertext area (past the 8-byte header + 1568-byte KEM ciphertext)
 python3 -c "
 with open('$TMPDIR/tampered.enc', 'r+b') as f:
     f.seek(1600)
@@ -113,40 +129,33 @@ with open('$TMPDIR/tampered.enc', 'r+b') as f:
     f.write(bytes([b[0] ^ 0xFF]))
 " 2>/dev/null || dd if=/dev/urandom of="$TMPDIR/tampered.enc" bs=1 count=1 seek=1600 conv=notrunc 2>/dev/null
 
-if "$BINARY" --key-file "$KEYFILE" --passphrase "$PASS" decrypt "$TMPDIR/tampered.enc" "$TMPDIR/tampered_out.txt" file > /dev/null 2>&1; then
-    fail "tampered ciphertext rejects decryption"
-else
-    pass "tampered ciphertext rejects decryption"
-fi
+check_fail "tampered ciphertext rejects decryption" \
+    "$BINARY" --force --key-file "$KEYFILE" --passphrase "$PASS" \
+    decrypt "$TMPDIR/tampered.enc" "$TMPDIR/tampered_out.txt" file
 
-# --- Test 5: Custom key file ---
+# --- Test 7: custom key file ---
 echo ""
 echo "[test: custom key file]"
 echo "Custom key test data" > "$TMPDIR/custom_input.txt"
 
-if "$BINARY" --key-file "$TMPDIR/custom.key" --passphrase "$PASS" encrypt "$TMPDIR/custom_input.txt" "$TMPDIR/custom_input.enc" file > /dev/null 2>&1; then
-    pass "encrypt with custom key file succeeds"
-else
-    fail "encrypt with custom key file succeeds"
-fi
+check_ok "encrypt with custom key file succeeds" \
+    "$BINARY" --force --key-file "$TMPDIR/custom.key" --passphrase "$PASS" \
+    encrypt "$TMPDIR/custom_input.txt" "$TMPDIR/custom_input.enc" file
+check_ok "custom key file created" \
+    test -f "$TMPDIR/custom.key"
+check_ok "decrypt with custom key file succeeds" \
+    "$BINARY" --force --key-file "$TMPDIR/custom.key" --passphrase "$PASS" \
+    decrypt "$TMPDIR/custom_input.enc" "$TMPDIR/custom_output.txt" file
+check_ok "custom key file round-trip matches" \
+    diff -q "$TMPDIR/custom_input.txt" "$TMPDIR/custom_output.txt"
 
-if [ -f "$TMPDIR/custom.key" ]; then
-    pass "custom key file created"
-else
-    fail "custom key file created"
-fi
-
-if "$BINARY" --key-file "$TMPDIR/custom.key" --passphrase "$PASS" decrypt "$TMPDIR/custom_input.enc" "$TMPDIR/custom_output.txt" file > /dev/null 2>&1; then
-    pass "decrypt with custom key file succeeds"
-else
-    fail "decrypt with custom key file succeeds"
-fi
-
-if diff -q "$TMPDIR/custom_input.txt" "$TMPDIR/custom_output.txt" > /dev/null 2>&1; then
-    pass "custom key file round-trip matches"
-else
-    fail "custom key file round-trip matches"
-fi
+# --- Test 8: invalid arguments rejected ---
+echo ""
+echo "[test: argument validation]"
+check_fail "missing passphrase is rejected" \
+    "$BINARY" encrypt "$TMPDIR/test_input.txt" "$TMPDIR/x.enc" file
+check_fail "invalid operation is rejected" \
+    "$BINARY" --passphrase "$PASS" frobnicate "$TMPDIR/test_input.txt" "$TMPDIR/x.enc" file
 
 # --- Results ---
 echo ""
