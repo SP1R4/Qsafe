@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <utime.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -21,6 +22,8 @@ void crypto_handle_errors(void) {
     ERR_print_errors_fp(stderr);
 }
 
+/* Progress is drawn on stderr so it never corrupts ciphertext/plaintext that
+ * may be streamed to stdout. */
 void crypto_print_progress_bar(size_t current, size_t total) {
     if (total == 0) {
         return;
@@ -33,14 +36,50 @@ void crypto_print_progress_bar(size_t current, size_t total) {
     }
     int pos = (int)(bar_width * progress);
 
-    printf("[");
+    fprintf(stderr, "[");
     for (int i = 0; i < bar_width; ++i) {
-        if (i < pos) printf("=");
-        else if (i == pos) printf(">");
-        else printf(" ");
+        if (i < pos) fprintf(stderr, "=");
+        else if (i == pos) fprintf(stderr, ">");
+        else fprintf(stderr, " ");
     }
-    printf("] %d%%\r", (int)(progress * 100));
-    fflush(stdout);
+    fprintf(stderr, "] %d%%\r", (int)(progress * 100));
+    fflush(stderr);
+}
+
+/* --- little-endian (de)serialization for the metadata block --- */
+
+static void store_u16(unsigned char *p, uint16_t v) {
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+}
+static void store_u32(unsigned char *p, uint32_t v) {
+    for (int i = 0; i < 4; i++) p[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+}
+static void store_u64(unsigned char *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+}
+static uint16_t load_u16(const unsigned char *p) {
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+static uint32_t load_u32(const unsigned char *p) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)p[i] << (8 * i);
+    return v;
+}
+static uint64_t load_u64(const unsigned char *p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
+    return v;
+}
+
+/* Returns a pointer to the final path component (defends against a stored name
+ * that contains directory separators). */
+static const char *path_basename(const char *path) {
+    const char *base = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/') base = c + 1;
+    }
+    return base;
 }
 
 crypto_error_t crypto_derive_aes_key(const unsigned char *shared_secret, size_t secret_len, unsigned char *aes_key) {
@@ -116,9 +155,10 @@ crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const u
 }
 
 /* Returns 1 if the output file may be written, 0 if the user declined.
- * With --force, or when the path does not exist yet, this always returns 1. */
+ * With --force, when writing to stdout, or when the path does not exist yet,
+ * this always returns 1. */
 static int crypto_should_write(const char *path, const crypto_config_t *config) {
-    if (config->force_overwrite) {
+    if (config->force_overwrite || strcmp(path, "-") == 0) {
         return 1;
     }
 
@@ -184,6 +224,12 @@ crypto_error_t crypto_save_secret_key(const char *filename, const unsigned char 
         goto cleanup;
     }
 
+    if (!crypto_should_write(filename, config)) {
+        fprintf(stderr, "Aborted: not overwriting %s\n", filename);
+        ret = CRYPTO_ERR_FILE_IO;
+        goto cleanup;
+    }
+
     file = fopen(filename, "wb");
     if (!file) {
         perror("Error opening key file");
@@ -199,6 +245,10 @@ crypto_error_t crypto_save_secret_key(const char *filename, const unsigned char 
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
+
+    /* Secret key material: restrict permissions to the owner. */
+    fflush(file);
+    chmod(filename, 0600);
 
     ret = CRYPTO_SUCCESS;
 
@@ -303,6 +353,76 @@ cleanup:
     return result;
 }
 
+crypto_error_t crypto_save_public_key(const char *filename, const unsigned char *public_key, size_t length, const crypto_config_t *config) {
+    if (!crypto_should_write(filename, config)) {
+        fprintf(stderr, "Aborted: not overwriting %s\n", filename);
+        return CRYPTO_ERR_FILE_IO;
+    }
+
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        perror("Error opening public key file");
+        return CRYPTO_ERR_FILE_IO;
+    }
+
+    crypto_error_t ret = CRYPTO_SUCCESS;
+    if (fwrite(public_key, 1, length, file) != length) {
+        perror("Error writing public key file");
+        ret = CRYPTO_ERR_FILE_IO;
+    }
+    fclose(file);
+    return ret;
+}
+
+unsigned char *crypto_load_public_key(const char *filename, size_t expected_length, const crypto_config_t *config) {
+    (void)config;
+
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        perror("Error opening public key file");
+        return NULL;
+    }
+
+    unsigned char *buf = malloc(expected_length);
+    if (!buf) {
+        fclose(file);
+        return NULL;
+    }
+
+    size_t got = fread(buf, 1, expected_length, file);
+    /* Reject anything that is not exactly the expected size (one extra byte
+     * means the file is longer than a valid public key). */
+    int extra = (fgetc(file) != EOF);
+    fclose(file);
+
+    if (got != expected_length || extra) {
+        fprintf(stderr, "Error: Invalid public key file (expected %zu bytes)\n", expected_length);
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+/* --- stream open/close helpers (with '-' meaning stdin/stdout) --- */
+
+static int is_stream_arg(const char *path) {
+    return strcmp(path, "-") == 0;
+}
+
+static FILE *open_input(const char *path) {
+    if (is_stream_arg(path)) return stdin;
+    return fopen(path, "rb");
+}
+
+static FILE *open_output(const char *path) {
+    if (is_stream_arg(path)) return stdout;
+    return fopen(path, "wb");
+}
+
+static void close_stream(FILE *f) {
+    if (f && f != stdin && f != stdout) fclose(f);
+}
+
 crypto_error_t crypto_encrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem, unsigned char *aes_key, unsigned char *public_key, unsigned char *secret_key, const crypto_config_t *config) {
     (void)secret_key; /* not needed for encryption */
 
@@ -315,26 +435,39 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
     FILE *in_file = NULL;
     FILE *out_file = NULL;
     int output_created = 0;
+    int from_stdin = is_stream_arg(input_filename);
     unsigned char nonce[AES_GCM_NONCE_SIZE];
     unsigned char tag[AES_GCM_TAG_SIZE];
+    unsigned char meta[QSAFE_META_SIZE];
 
-    in_file = fopen(input_filename, "rb");
+    in_file = open_input(input_filename);
     if (!in_file) {
         perror("Error opening input file");
         return CRYPTO_ERR_FILE_IO;
     }
 
-    if (fseek(in_file, 0, SEEK_END) != 0) {
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
+    /* Build the metadata block. For real files we capture the original name,
+     * permission bits, and mtime; for stdin there is nothing to capture. */
+    memset(meta, 0, sizeof(meta));
+    size_t file_size = 0;
+    int have_size = 0;
+    if (!from_stdin) {
+        struct stat st;
+        if (stat(input_filename, &st) == 0) {
+            file_size = (size_t)st.st_size;
+            have_size = 1;
+
+            const char *base = path_basename(input_filename);
+            size_t name_len = strlen(base);
+            if (name_len > QSAFE_MAX_NAME) name_len = QSAFE_MAX_NAME;
+
+            meta[0] = QSAFE_META_FLAG_PRESENT;
+            store_u16(meta + 2, (uint16_t)name_len);
+            memcpy(meta + 4, base, name_len);
+            store_u32(meta + 4 + QSAFE_META_NAME_FIELD, (uint32_t)(st.st_mode & 0777));
+            store_u64(meta + 4 + QSAFE_META_NAME_FIELD + 4, (uint64_t)st.st_mtime);
+        }
     }
-    long fs = ftell(in_file);
-    rewind(in_file);
-    if (fs < 0) {
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-    size_t file_size = (size_t)fs;
 
     if (RAND_bytes(nonce, AES_GCM_NONCE_SIZE) != 1) {
         fprintf(stderr, "Error: Failed to generate random nonce\n");
@@ -361,14 +494,6 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    if (config->verbose) {
-        printf("AES Key: ");
-        for (int i = 0; i < AES_KEY_SIZE; i++) printf("%02x", aes_key[i]);
-        printf("\nNonce: ");
-        for (int i = 0; i < AES_GCM_NONCE_SIZE; i++) printf("%02x", nonce[i]);
-        printf("\n");
-    }
-
     ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {
         crypto_handle_errors();
@@ -382,31 +507,46 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    /* Authenticate the version header + KEM ciphertext as additional data so a
-     * swapped header or KEM ciphertext is rejected by the GCM tag. */
+    /* Authenticate header + nonce + KEM ciphertext as additional data so any of
+     * them being swapped is rejected by the GCM tag. */
     if (EVP_EncryptUpdate(ctx, NULL, &len, (const unsigned char *)VERSION_HEADER, VERSION_HEADER_SIZE) != 1 ||
+        EVP_EncryptUpdate(ctx, NULL, &len, nonce, AES_GCM_NONCE_SIZE) != 1 ||
         EVP_EncryptUpdate(ctx, NULL, &len, ciphertext_kem, (int)kem->length_ciphertext) != 1) {
         crypto_handle_errors();
         goto cleanup;
     }
 
     if (!crypto_should_write(output_filename, config)) {
-        printf("Skipped %s\n", output_filename);
+        fprintf(stderr, "Skipped %s\n", output_filename);
         ret = CRYPTO_SUCCESS;
         goto cleanup;
     }
 
-    out_file = fopen(output_filename, "wb");
+    out_file = open_output(output_filename);
     if (!out_file) {
         perror("Error opening output file");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
-    output_created = 1;
+    output_created = !is_stream_arg(output_filename);
 
+    /* File header: magic | nonce | KEM ciphertext. */
     if (fwrite(VERSION_HEADER, 1, VERSION_HEADER_SIZE, out_file) != VERSION_HEADER_SIZE ||
+        fwrite(nonce, 1, AES_GCM_NONCE_SIZE, out_file) != AES_GCM_NONCE_SIZE ||
         fwrite(ciphertext_kem, 1, kem->length_ciphertext, out_file) != kem->length_ciphertext) {
         fprintf(stderr, "Error: Failed to write file header\n");
+        ret = CRYPTO_ERR_FILE_IO;
+        goto cleanup;
+    }
+
+    /* The metadata block is the first plaintext encrypted into the stream. */
+    if (EVP_EncryptUpdate(ctx, out_buffer, &len, meta, QSAFE_META_SIZE) != 1) {
+        fprintf(stderr, "Error: AES-GCM encryption failed\n");
+        crypto_handle_errors();
+        goto cleanup;
+    }
+    if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
+        fprintf(stderr, "Error: Failed to write to output file\n");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
@@ -437,7 +577,7 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         }
 
         total_processed += bytes_read;
-        if (total_processed - last_report >= (1u << 20) || total_processed == file_size) {
+        if (have_size && (total_processed - last_report >= (1u << 20) || total_processed == file_size)) {
             crypto_print_progress_bar(total_processed, file_size);
             last_report = total_processed;
         }
@@ -460,22 +600,22 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    if (fwrite(nonce, 1, AES_GCM_NONCE_SIZE, out_file) != AES_GCM_NONCE_SIZE ||
-        fwrite(tag, 1, AES_GCM_TAG_SIZE, out_file) != AES_GCM_TAG_SIZE) {
-        fprintf(stderr, "Error: Failed to write nonce or tag\n");
+    /* The tag is the trailing 16 bytes of the stream. */
+    if (fwrite(tag, 1, AES_GCM_TAG_SIZE, out_file) != AES_GCM_TAG_SIZE) {
+        fprintf(stderr, "Error: Failed to write authentication tag\n");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
-    if (file_size > 0) {
-        printf("\n");
+    if (have_size && file_size > 0) {
+        fprintf(stderr, "\n");
     }
 
     ret = CRYPTO_SUCCESS;
 
 cleanup:
     if (ctx) EVP_CIPHER_CTX_free(ctx);
-    if (in_file) fclose(in_file);
-    if (out_file) fclose(out_file);
+    close_stream(in_file);
+    close_stream(out_file);
     free(in_buffer);
     free(out_buffer);
     free(ciphertext_kem);
@@ -490,6 +630,116 @@ cleanup:
     return ret;
 }
 
+/* Sink that consumes decrypted plaintext: peels off the leading metadata block,
+ * opens the (possibly directory-resolved) output, then streams the rest. */
+typedef struct {
+    int meta_done;
+    size_t meta_have;
+    unsigned char meta[QSAFE_META_SIZE];
+
+    int has_meta;
+    char name[QSAFE_MAX_NAME + 1];
+    unsigned int mode;
+    uint64_t mtime;
+
+    FILE *out;
+    int out_created;
+    int to_stdout;
+    int skipped;
+    char out_path[MAX_PATH_LENGTH];
+
+    const char *output_arg;
+    const crypto_config_t *config;
+} dec_sink_t;
+
+/* Resolves the output path and opens it once metadata has been parsed.
+ * Returns CRYPTO_SUCCESS (out opened, or user skipped) or an error code. */
+static crypto_error_t dec_sink_open(dec_sink_t *s) {
+    if (is_stream_arg(s->output_arg)) {
+        s->to_stdout = 1;
+        s->out = stdout;
+        return CRYPTO_SUCCESS;
+    }
+
+    /* If the destination is an existing directory, restore into it using the
+     * stored original filename. */
+    struct stat st;
+    if (stat(s->output_arg, &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (!s->has_meta || s->name[0] == '\0') {
+            fprintf(stderr, "Error: output is a directory but the file has no stored name\n");
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+        if (snprintf(s->out_path, sizeof(s->out_path), "%s/%s", s->output_arg, s->name) >= (int)sizeof(s->out_path)) {
+            fprintf(stderr, "Error: resolved output path too long\n");
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+    } else {
+        if (snprintf(s->out_path, sizeof(s->out_path), "%s", s->output_arg) >= (int)sizeof(s->out_path)) {
+            fprintf(stderr, "Error: output path too long\n");
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+    }
+
+    if (!crypto_should_write(s->out_path, s->config)) {
+        fprintf(stderr, "Skipped %s\n", s->out_path);
+        s->skipped = 1;
+        return CRYPTO_SUCCESS;
+    }
+
+    s->out = fopen(s->out_path, "wb");
+    if (!s->out) {
+        perror("Error opening output file");
+        return CRYPTO_ERR_FILE_IO;
+    }
+    s->out_created = 1;
+    return CRYPTO_SUCCESS;
+}
+
+/* Feed decrypted plaintext bytes through the sink. Returns CRYPTO_SUCCESS or an
+ * error code. */
+static crypto_error_t dec_sink_write(dec_sink_t *s, const unsigned char *p, size_t n) {
+    if (!s->meta_done) {
+        size_t need = QSAFE_META_SIZE - s->meta_have;
+        size_t take = n < need ? n : need;
+        memcpy(s->meta + s->meta_have, p, take);
+        s->meta_have += take;
+        p += take;
+        n -= take;
+
+        if (s->meta_have < QSAFE_META_SIZE) {
+            return CRYPTO_SUCCESS; /* still collecting metadata */
+        }
+
+        /* Parse the metadata block. */
+        s->has_meta = (s->meta[0] & QSAFE_META_FLAG_PRESENT) != 0;
+        if (s->has_meta) {
+            uint16_t nl = load_u16(s->meta + 2);
+            if (nl > QSAFE_MAX_NAME) nl = QSAFE_MAX_NAME;
+            memcpy(s->name, s->meta + 4, nl);
+            s->name[nl] = '\0';
+            /* Reject path components in the stored name (traversal defense). */
+            const char *base = path_basename(s->name);
+            if (base != s->name) memmove(s->name, base, strlen(base) + 1);
+            if (strcmp(s->name, "..") == 0) s->name[0] = '\0';
+            s->mode = load_u32(s->meta + 4 + QSAFE_META_NAME_FIELD);
+            s->mtime = load_u64(s->meta + 4 + QSAFE_META_NAME_FIELD + 4);
+        }
+        s->meta_done = 1;
+
+        crypto_error_t orc = dec_sink_open(s);
+        if (orc != CRYPTO_SUCCESS) return orc;
+    }
+
+    if (n == 0 || s->skipped || !s->out) {
+        return CRYPTO_SUCCESS;
+    }
+    if (fwrite(p, 1, n, s->out) != n) {
+        fprintf(stderr, "Error: Failed to write output file\n");
+        return CRYPTO_ERR_FILE_IO;
+    }
+    return CRYPTO_SUCCESS;
+}
+
 crypto_error_t crypto_decrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem, unsigned char *aes_key, unsigned char *public_key, unsigned char *secret_key, const crypto_config_t *config) {
     (void)public_key; /* not needed for decryption */
 
@@ -498,68 +748,51 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
     uint8_t *shared_secret = NULL;
     unsigned char *in_buffer = NULL;
     unsigned char *out_buffer = NULL;
+    unsigned char *work = NULL;
     EVP_CIPHER_CTX *ctx = NULL;
     FILE *in_file = NULL;
-    FILE *out_file = NULL;
-    int output_created = 0;
     unsigned char nonce[AES_GCM_NONCE_SIZE];
     unsigned char tag[AES_GCM_TAG_SIZE];
+    unsigned char hold[AES_GCM_TAG_SIZE];
+    size_t holdn = 0;
     char header[VERSION_HEADER_SIZE];
 
-    in_file = fopen(input_filename, "rb");
+    dec_sink_t sink;
+    memset(&sink, 0, sizeof(sink));
+    sink.output_arg = output_filename;
+    sink.config = config;
+
+    in_file = open_input(input_filename);
     if (!in_file) {
         perror("Error opening input file");
         return CRYPTO_ERR_FILE_IO;
     }
 
-    if (fseek(in_file, 0, SEEK_END) != 0) {
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-    long fs = ftell(in_file);
-    if (fs < 0) {
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-    size_t file_size = (size_t)fs;
-
-    size_t min_size = VERSION_HEADER_SIZE + kem->length_ciphertext + AES_GCM_NONCE_SIZE + AES_GCM_TAG_SIZE;
-    if (file_size < min_size) {
-        fprintf(stderr, "Error: Invalid encrypted file (size %zu, expected >= %zu)\n", file_size, min_size);
-        ret = CRYPTO_ERR_INVALID_INPUT;
-        goto cleanup;
-    }
-    size_t aes_len = file_size - min_size;
-
     ciphertext_kem = malloc(kem->length_ciphertext);
     in_buffer = malloc(BUFFER_SIZE);
     out_buffer = malloc(BUFFER_SIZE + AES_BLOCK_SIZE);
+    work = malloc(BUFFER_SIZE + AES_GCM_TAG_SIZE);
     shared_secret = malloc(kem->length_shared_secret);
-    if (!ciphertext_kem || !in_buffer || !out_buffer || !shared_secret) {
+    if (!ciphertext_kem || !in_buffer || !out_buffer || !work || !shared_secret) {
         fprintf(stderr, "Error: Failed to allocate memory\n");
         ret = CRYPTO_ERR_MEMORY;
         goto cleanup;
     }
 
-    /* Header + KEM ciphertext live at the front of the file. */
-    rewind(in_file);
+    /* Header: magic | nonce | KEM ciphertext, read straight off the stream. */
     if (fread(header, 1, VERSION_HEADER_SIZE, in_file) != VERSION_HEADER_SIZE ||
         memcmp(header, VERSION_HEADER, VERSION_HEADER_SIZE) != 0) {
         fprintf(stderr, "Error: Invalid file format or version\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
-    if (fread(ciphertext_kem, 1, kem->length_ciphertext, in_file) != kem->length_ciphertext) {
-        fprintf(stderr, "Error: Failed to read KEM ciphertext\n");
+    if (fread(nonce, 1, AES_GCM_NONCE_SIZE, in_file) != AES_GCM_NONCE_SIZE) {
+        fprintf(stderr, "Error: Failed to read nonce\n");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
-
-    /* Nonce + tag are the last 28 bytes of the file. */
-    if (fseek(in_file, (long)(file_size - AES_GCM_NONCE_SIZE - AES_GCM_TAG_SIZE), SEEK_SET) != 0 ||
-        fread(nonce, 1, AES_GCM_NONCE_SIZE, in_file) != AES_GCM_NONCE_SIZE ||
-        fread(tag, 1, AES_GCM_TAG_SIZE, in_file) != AES_GCM_TAG_SIZE) {
-        fprintf(stderr, "Error: Failed to read nonce/tag\n");
+    if (fread(ciphertext_kem, 1, kem->length_ciphertext, in_file) != kem->length_ciphertext) {
+        fprintf(stderr, "Error: Failed to read KEM ciphertext\n");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
@@ -572,16 +805,6 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
     if (crypto_derive_aes_key(shared_secret, kem->length_shared_secret, aes_key) != CRYPTO_SUCCESS) {
         fprintf(stderr, "Error: Failed to derive AES key\n");
         goto cleanup;
-    }
-
-    if (config->verbose) {
-        printf("File size: %zu bytes\n", file_size);
-        printf("AES ciphertext length: %zu bytes\n", aes_len);
-        printf("AES Key: ");
-        for (int i = 0; i < AES_KEY_SIZE; i++) printf("%02x", aes_key[i]);
-        printf("\nNonce: ");
-        for (int i = 0; i < AES_GCM_NONCE_SIZE; i++) printf("%02x", nonce[i]);
-        printf("\n");
     }
 
     ctx = EVP_CIPHER_CTX_new();
@@ -600,63 +823,61 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
 
     /* Feed the same additional data the encryptor authenticated. */
     if (EVP_DecryptUpdate(ctx, NULL, &len, (const unsigned char *)VERSION_HEADER, VERSION_HEADER_SIZE) != 1 ||
+        EVP_DecryptUpdate(ctx, NULL, &len, nonce, AES_GCM_NONCE_SIZE) != 1 ||
         EVP_DecryptUpdate(ctx, NULL, &len, ciphertext_kem, (int)kem->length_ciphertext) != 1) {
         crypto_handle_errors();
         goto cleanup;
     }
 
-    if (!crypto_should_write(output_filename, config)) {
-        printf("Skipped %s\n", output_filename);
-        ret = CRYPTO_SUCCESS;
-        goto cleanup;
-    }
-
-    out_file = fopen(output_filename, "wb");
-    if (!out_file) {
-        perror("Error opening output file");
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-    output_created = 1;
-
-    /* Stream the AES ciphertext directly from disk: it begins right after the
-     * header + KEM ciphertext and runs for aes_len bytes. */
-    if (fseek(in_file, (long)(VERSION_HEADER_SIZE + kem->length_ciphertext), SEEK_SET) != 0) {
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-
-    size_t remaining = aes_len;
-    size_t total_processed = 0;
-    size_t last_report = 0;
-    while (remaining > 0) {
-        size_t want = remaining < BUFFER_SIZE ? remaining : BUFFER_SIZE;
-        size_t got = fread(in_buffer, 1, want, in_file);
-        if (got != want) {
-            fprintf(stderr, "Error: Failed to read ciphertext\n");
-            ret = CRYPTO_ERR_FILE_IO;
-            goto cleanup;
+    /* Stream the remaining bytes, always holding back the final 16 (the tag).
+     * This works identically for files and pipes since we never seek. */
+    while (1) {
+        size_t bytes_read = fread(in_buffer, 1, BUFFER_SIZE, in_file);
+        if (bytes_read == 0) {
+            if (ferror(in_file)) {
+                fprintf(stderr, "Error: Failed to read ciphertext\n");
+                ret = CRYPTO_ERR_FILE_IO;
+                goto cleanup;
+            }
+            break; /* EOF */
         }
 
-        if (EVP_DecryptUpdate(ctx, out_buffer, &len, in_buffer, (int)got) != 1) {
+        /* Combine carried-over bytes with the new read, then process all but
+         * the trailing 16 (which may turn out to be the tag). */
+        memcpy(work, hold, holdn);
+        memcpy(work + holdn, in_buffer, bytes_read);
+        size_t total = holdn + bytes_read;
+
+        if (total <= AES_GCM_TAG_SIZE) {
+            memcpy(hold, work, total);
+            holdn = total;
+            continue;
+        }
+
+        size_t process = total - AES_GCM_TAG_SIZE;
+        memcpy(hold, work + process, AES_GCM_TAG_SIZE);
+        holdn = AES_GCM_TAG_SIZE;
+
+        if (EVP_DecryptUpdate(ctx, out_buffer, &len, work, (int)process) != 1) {
             fprintf(stderr, "Error: AES-GCM decryption failed\n");
             crypto_handle_errors();
             goto cleanup;
         }
-
-        if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
-            fprintf(stderr, "Error: Failed to write output file\n");
-            ret = CRYPTO_ERR_FILE_IO;
-            goto cleanup;
-        }
-
-        remaining -= got;
-        total_processed += got;
-        if (total_processed - last_report >= (1u << 20) || remaining == 0) {
-            crypto_print_progress_bar(total_processed, aes_len);
-            last_report = total_processed;
+        if (len > 0) {
+            crypto_error_t wr = dec_sink_write(&sink, out_buffer, (size_t)len);
+            if (wr != CRYPTO_SUCCESS) {
+                ret = wr;
+                goto cleanup;
+            }
         }
     }
+
+    if (holdn != AES_GCM_TAG_SIZE) {
+        fprintf(stderr, "Error: Truncated or invalid encrypted file\n");
+        ret = CRYPTO_ERR_INVALID_INPUT;
+        goto cleanup;
+    }
+    memcpy(tag, hold, AES_GCM_TAG_SIZE);
 
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AES_GCM_TAG_SIZE, tag) != 1 ||
         EVP_DecryptFinal_ex(ctx, out_buffer, &len) != 1) {
@@ -664,31 +885,49 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         ret = CRYPTO_ERR_INTEGRITY;
         goto cleanup;
     }
-    if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
-        fprintf(stderr, "Error: Failed to write final chunk\n");
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
+    if (len > 0) {
+        crypto_error_t wr = dec_sink_write(&sink, out_buffer, (size_t)len);
+        if (wr != CRYPTO_SUCCESS) {
+            ret = wr;
+            goto cleanup;
+        }
     }
-    if (aes_len > 0) {
-        printf("\n");
+
+    /* A valid file always carries at least the metadata block, so by now the
+     * sink must have parsed it and opened (or deliberately skipped) the output. */
+    if (!sink.meta_done) {
+        fprintf(stderr, "Error: Encrypted file is missing its metadata block\n");
+        ret = CRYPTO_ERR_INVALID_INPUT;
+        goto cleanup;
     }
 
     ret = CRYPTO_SUCCESS;
 
 cleanup:
     if (ctx) EVP_CIPHER_CTX_free(ctx);
-    if (in_file) fclose(in_file);
-    if (out_file) fclose(out_file);
+    close_stream(in_file);
+    if (sink.out && sink.out != stdout) fclose(sink.out);
     free(in_buffer);
     free(out_buffer);
+    free(work);
     free(ciphertext_kem);
     if (shared_secret) {
         OPENSSL_cleanse(shared_secret, kem->length_shared_secret);
         free(shared_secret);
     }
     OPENSSL_cleanse(aes_key, AES_KEY_SIZE);
-    if (ret != CRYPTO_SUCCESS && output_created) {
-        remove(output_filename); /* never leave behind unauthenticated plaintext */
+
+    if (ret == CRYPTO_SUCCESS) {
+        /* Restore stored permissions and modification time on success. */
+        if (sink.out_created && sink.has_meta && !sink.skipped) {
+            chmod(sink.out_path, (mode_t)(sink.mode & 0777));
+            struct utimbuf times;
+            times.actime = (time_t)sink.mtime;
+            times.modtime = (time_t)sink.mtime;
+            utime(sink.out_path, &times);
+        }
+    } else if (sink.out_created) {
+        remove(sink.out_path); /* never leave behind unauthenticated plaintext */
     }
     return ret;
 }
@@ -714,9 +953,11 @@ crypto_error_t crypto_process_directory(const char *dir_path, const char *output
         }
     }
 
-    /* Resolve the key file so it is never treated as an input file. */
+    /* Resolve the key files so they are never treated as input files. */
     char key_real[PATH_MAX];
+    char pub_real[PATH_MAX];
     int have_key_real = crypto_realpath(config->secret_key_file, key_real);
+    int have_pub_real = config->public_key_file && crypto_realpath(config->public_key_file, pub_real);
 
     crypto_error_t ret = CRYPTO_SUCCESS;
     struct dirent *entry;
@@ -751,10 +992,11 @@ crypto_error_t crypto_process_directory(const char *dir_path, const char *output
             continue;
         }
 
-        /* Skip the secret key file if it happens to live inside the input tree. */
+        /* Skip the key files if they happen to live inside the input tree. */
         char entry_real[PATH_MAX];
-        if (have_key_real && crypto_realpath(input_file_path, entry_real) &&
-            strcmp(entry_real, key_real) == 0) {
+        if (crypto_realpath(input_file_path, entry_real) &&
+            ((have_key_real && strcmp(entry_real, key_real) == 0) ||
+             (have_pub_real && strcmp(entry_real, pub_real) == 0))) {
             continue;
         }
 

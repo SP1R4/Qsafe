@@ -13,12 +13,36 @@
 #define BUFFER_SIZE 4096
 #define MAX_PATH_LENGTH 1024
 #define DEFAULT_SECRET_KEY_FILE "secret_key.bin"
+#define PUBLIC_KEY_SUFFIX ".pub"
 
-/* On-disk magic for Qsafe v3 files. The v3 format switched the KEM to
- * ML-KEM-1024 (FIPS 203) and the key-file format to scrypt + salt, so it is
- * intentionally incompatible with the older "CRYPTOv2" files. */
-#define VERSION_HEADER "QSAFE003"
+/* On-disk magic for Qsafe v4 files.
+ *
+ * v4 changes versus v3:
+ *   - True public-key workflow: keys are generated once with `keygen`; encrypt
+ *     uses only the public key, decrypt only the (passphrase-wrapped) secret key.
+ *   - The AES-GCM nonce moved to the front of the file so decryption can stream
+ *     straight from a pipe (no seek-to-end required); the tag is recovered by
+ *     holding back the final 16 bytes of the stream.
+ *   - A fixed-size, encrypted+authenticated metadata block (original name, mode,
+ *     mtime) is prepended to the plaintext so decrypt can restore the file.
+ *
+ * v4 is intentionally incompatible with older QSAFE003 / CRYPTOv2 files. */
+#define VERSION_HEADER "QSAFE004"
 #define VERSION_HEADER_SIZE 8
+
+/* Fixed-size metadata block prepended to the plaintext before encryption.
+ * Layout (little-endian, total QSAFE_META_SIZE bytes):
+ *   u8   flags        (bit 0: metadata present)
+ *   u8   reserved
+ *   u16  name_len     (<= QSAFE_MAX_NAME)
+ *   u8   name[256]    (name_len valid bytes; remainder zero)
+ *   u32  mode         (st_mode & 0777)
+ *   u64  mtime        (seconds since epoch) */
+#define QSAFE_MAX_NAME 255
+#define QSAFE_META_NAME_FIELD 256
+#define QSAFE_META_SIZE (1 + 1 + 2 + QSAFE_META_NAME_FIELD + 4 + 8) /* 272 */
+
+#define QSAFE_META_FLAG_PRESENT 0x01
 
 typedef enum {
     CRYPTO_SUCCESS = 0,
@@ -33,6 +57,7 @@ typedef struct {
     int verbose;
     int force_overwrite;
     const char *secret_key_file;
+    const char *public_key_file;
     const char *passphrase;
 } crypto_config_t;
 
@@ -48,6 +73,11 @@ crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const u
 
 crypto_error_t crypto_save_secret_key(const char *filename, const unsigned char *secret_key, size_t length, const crypto_config_t *config);
 unsigned char *crypto_load_secret_key(const char *filename, size_t *length, const crypto_config_t *config);
+
+/* Public keys are stored in the clear (raw bytes); no passphrase is involved. */
+crypto_error_t crypto_save_public_key(const char *filename, const unsigned char *public_key, size_t length, const crypto_config_t *config);
+unsigned char *crypto_load_public_key(const char *filename, size_t expected_length, const crypto_config_t *config);
+
 crypto_error_t crypto_encrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem, unsigned char *aes_key, unsigned char *public_key, unsigned char *secret_key, const crypto_config_t *config);
 crypto_error_t crypto_decrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem, unsigned char *aes_key, unsigned char *public_key, unsigned char *secret_key, const crypto_config_t *config);
 crypto_error_t crypto_process_directory(const char *dir_path, const char *output_dir, const char *operation, OQS_KEM *kem, unsigned char *aes_key, unsigned char *public_key, unsigned char *secret_key, const crypto_config_t *config);

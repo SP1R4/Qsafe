@@ -160,6 +160,37 @@ static void test_save_load_secret_key(void) {
     remove(keyfile2);
 }
 
+static void test_save_load_public_key(void) {
+    printf("\n[test_save_load_public_key]\n");
+
+    const char *pubfile = "/tmp/test_qsafe_pub.bin";
+    unsigned char original[1568];
+    RAND_bytes(original, sizeof(original));
+
+    crypto_config_t config = {
+        .verbose = 0, .force_overwrite = 1,
+        .secret_key_file = DEFAULT_SECRET_KEY_FILE,
+        .public_key_file = pubfile, .passphrase = NULL
+    };
+
+    crypto_error_t ret = crypto_save_public_key(pubfile, original, sizeof(original), &config);
+    ASSERT(ret == CRYPTO_SUCCESS, "save_public_key returns CRYPTO_SUCCESS");
+
+    unsigned char *loaded = crypto_load_public_key(pubfile, sizeof(original), &config);
+    ASSERT(loaded != NULL, "load_public_key returns non-NULL");
+    if (loaded) {
+        ASSERT(memcmp(original, loaded, sizeof(original)) == 0, "public key round-trips unchanged");
+        free(loaded);
+    }
+
+    /* Loading with the wrong expected length must fail. */
+    loaded = crypto_load_public_key(pubfile, sizeof(original) - 1, &config);
+    ASSERT(loaded == NULL, "wrong expected length is rejected");
+    free(loaded);
+
+    remove(pubfile);
+}
+
 /* Encrypts then decrypts a buffer of the given size and checks the round-trip. */
 static void roundtrip_case(OQS_KEM *kem, uint8_t *public_key, uint8_t *secret_key,
                            size_t size, const char *label) {
@@ -234,11 +265,12 @@ static void test_encrypt_decrypt_file(void) {
     crypto_error_t ret = crypto_encrypt_file(plain, enc, kem, aes_key, public_key, secret_key, &config);
     ASSERT(ret == CRYPTO_SUCCESS, "encrypt tamper-test file");
 
-    /* Flip a byte inside the AES ciphertext region. */
+    /* Flip a byte inside the AES ciphertext region (past header, nonce, KEM
+     * ciphertext, and the prepended metadata block). */
     FILE *e = fopen(enc, "r+b");
     ASSERT(e != NULL, "open encrypted file for tampering");
     if (e) {
-        long off = (long)(VERSION_HEADER_SIZE + kem->length_ciphertext + 1);
+        long off = (long)(VERSION_HEADER_SIZE + AES_GCM_NONCE_SIZE + kem->length_ciphertext + QSAFE_META_SIZE + 1);
         unsigned char byte = 0;
         ASSERT(fseek(e, off, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read byte to tamper");
         byte ^= 0xFF;
@@ -254,10 +286,11 @@ static void test_encrypt_decrypt_file(void) {
     ASSERT(ret == CRYPTO_SUCCESS, "re-encrypt for KEM-tamper test");
     e = fopen(enc, "r+b");
     if (e) {
+        long koff = (long)(VERSION_HEADER_SIZE + AES_GCM_NONCE_SIZE);
         unsigned char byte = 0;
-        ASSERT(fseek(e, VERSION_HEADER_SIZE, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read KEM byte");
+        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read KEM byte");
         byte ^= 0xFF;
-        ASSERT(fseek(e, VERSION_HEADER_SIZE, SEEK_SET) == 0 && fwrite(&byte, 1, 1, e) == 1, "tamper KEM byte");
+        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fwrite(&byte, 1, 1, e) == 1, "tamper KEM byte");
         fclose(e);
         ret = crypto_decrypt_file(enc, dec, kem, aes_key, public_key, secret_key, &config);
         ASSERT(ret == CRYPTO_ERR_INTEGRITY || ret == CRYPTO_ERR_CRYPTO,
@@ -290,6 +323,7 @@ int main(void) {
     test_derive_aes_key();
     test_derive_key_from_passphrase();
     test_save_load_secret_key();
+    test_save_load_public_key();
     test_encrypt_decrypt_file();
     test_error_codes();
 

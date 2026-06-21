@@ -2,7 +2,11 @@
 *.o
 crypto
 crypto-v2
+qsafe
 tests/test_crypto
+
+# macOS
+.DS_Store
 
 # Dependencies
 liboqs/
