@@ -1,3 +1,7 @@
+/* Expose POSIX symbols (fileno, tcgetattr/tcsetattr, ...) under -std=c11,
+ * which otherwise restricts glibc to strict ISO C. */
+#define _DEFAULT_SOURCE
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
