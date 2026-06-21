@@ -162,7 +162,9 @@ chmod 600 "$TMPDIR/perm.txt"
 "$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/perm.txt" "$TMPDIR/perm.enc" >/dev/null 2>&1
 rm -f "$TMPDIR/perm.txt"
 "$BINARY" --force --key-file "$KEYFILE" decrypt "$TMPDIR/perm.enc" "$TMPDIR/perm.txt" >/dev/null 2>&1
-MODE=$(stat -f "%Lp" "$TMPDIR/perm.txt" 2>/dev/null || stat -c "%a" "$TMPDIR/perm.txt" 2>/dev/null)
+# GNU stat uses -c "%a"; BSD/macOS stat uses -f "%Lp". Try GNU first because
+# GNU's -f means --file-system and would succeed with the wrong output.
+MODE=$(stat -c "%a" "$TMPDIR/perm.txt" 2>/dev/null || stat -f "%Lp" "$TMPDIR/perm.txt" 2>/dev/null)
 if [ "$MODE" = "600" ]; then pass "decrypted file mode is 600"; else fail "decrypted file mode is 600 (got $MODE)"; fi
 
 # --- Test 6: wrong passphrase rejection ---
