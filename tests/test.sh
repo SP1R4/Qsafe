@@ -1,5 +1,5 @@
 #!/bin/bash
-# Qsafe 4.0 - End-to-end integration tests
+# Qsafe 5.0 - End-to-end integration tests
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -41,7 +41,7 @@ check_fail() {
 }
 
 echo ""
-echo "=== Qsafe 4.0 Integration Tests ==="
+echo "=== Qsafe 5.0 Integration Tests ==="
 
 if [ ! -x "$BINARY" ]; then
     echo "ERROR: $BINARY not found or not executable"
@@ -205,6 +205,133 @@ check_fail "encrypt without a public key is rejected" \
     encrypt "$TMPDIR/test_input.txt" "$TMPDIR/x.enc"
 check_fail "nonexistent input is rejected" \
     "$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/does_not_exist"
+
+# --- Test 9: inspect ---
+echo ""
+echo "[test: inspect]"
+check_ok "inspect public key succeeds" \
+    "$BINARY" inspect "$KEYFILE.pub"
+"$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -q "hybrid public key" \
+    && pass "inspect identifies public key" || fail "inspect identifies public key"
+"$BINARY" inspect "$TMPDIR/test_input.enc" 2>/dev/null | grep -q "QSAFE005" \
+    && pass "inspect identifies encrypted file" || fail "inspect identifies encrypted file"
+FP1=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
+FP2=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
+[ -n "$FP1" ] && [ "$FP1" = "$FP2" ] && pass "fingerprint is stable" || fail "fingerprint is stable"
+
+# --- Test 10: verify / --check ---
+echo ""
+echo "[test: verify and --check]"
+check_ok "verify accepts a valid file" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc"
+check_fail "verify rejects a tampered file" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/tampered.enc"
+rm -f "$TMPDIR/check_out.txt"
+check_ok "decrypt --check authenticates" \
+    "$BINARY" --key-file "$KEYFILE" decrypt --check "$TMPDIR/test_input.enc" "$TMPDIR/check_out.txt"
+check_ok "decrypt --check writes no plaintext" \
+    test ! -f "$TMPDIR/check_out.txt"
+
+# --- Test 11: rekey ---
+echo ""
+echo "[test: rekey]"
+echo "$QSAFE_PASSPHRASE" > "$TMPDIR/oldpp.txt"
+printf 'new-rekey-pass\nnew-rekey-pass\n' | \
+    "$BINARY" --key-file "$KEYFILE" rekey --passphrase-file "$TMPDIR/oldpp.txt" > /dev/null 2>&1 \
+    && pass "rekey succeeds" || fail "rekey succeeds"
+check_fail "old passphrase no longer works" \
+    env QSAFE_PASSPHRASE="$QSAFE_PASSPHRASE" "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc"
+check_ok "new passphrase decrypts existing ciphertext" \
+    env QSAFE_PASSPHRASE="new-rekey-pass" "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc"
+# Restore the original passphrase so the suite ends in a known state.
+printf '%s\n%s\n' "$QSAFE_PASSPHRASE" "$QSAFE_PASSPHRASE" | \
+    env QSAFE_PASSPHRASE="new-rekey-pass" "$BINARY" --key-file "$KEYFILE" rekey \
+    --passphrase-file <(echo "new-rekey-pass") > /dev/null 2>&1
+
+# --- Test 12: configurable scrypt cost ---
+echo ""
+echo "[test: scrypt cost]"
+SCKEY="$TMPDIR/sc.bin"
+check_ok "keygen with --scrypt-cost 16 succeeds" \
+    env QSAFE_PASSPHRASE="sc-pass" "$BINARY" keygen --key-file "$SCKEY" --scrypt-cost 16
+# Key file carries the versioned header magic.
+head -c 8 "$SCKEY" 2>/dev/null | grep -q "QSAFEK01" \
+    && pass "key file has versioned header" || fail "key file has versioned header"
+env QSAFE_PASSPHRASE="sc-pass" "$BINARY" encrypt --key-file "$SCKEY" "$TMPDIR/test_input.txt" "$TMPDIR/sc.enc" > /dev/null 2>&1
+check_ok "high-cost key decrypts its ciphertext" \
+    env QSAFE_PASSPHRASE="sc-pass" "$BINARY" --key-file "$SCKEY" verify "$TMPDIR/sc.enc"
+check_fail "out-of-range --scrypt-cost is rejected" \
+    env QSAFE_PASSPHRASE="sc-pass" "$BINARY" keygen --key-file "$TMPDIR/bad.bin" --scrypt-cost 99
+# Corrupting the authenticated cost header makes the key unusable.
+cp "$SCKEY" "$TMPDIR/sc_bad.bin"
+printf '\xff' | dd of="$TMPDIR/sc_bad.bin" bs=1 seek=8 count=1 conv=notrunc 2>/dev/null
+check_fail "tampered key header is rejected" \
+    env QSAFE_PASSPHRASE="sc-pass" "$BINARY" --key-file "$TMPDIR/sc_bad.bin" verify "$TMPDIR/sc.enc"
+
+# --- Test 13: multi-recipient encryption ---
+echo ""
+echo "[test: multi-recipient]"
+A="$TMPDIR/alice.bin"; B="$TMPDIR/bob.bin"
+env QSAFE_PASSPHRASE="alice-pass" "$BINARY" keygen --key-file "$A" > /dev/null 2>&1
+env QSAFE_PASSPHRASE="bob-pass"   "$BINARY" keygen --key-file "$B" > /dev/null 2>&1
+echo "shared secret message" > "$TMPDIR/shared.txt"
+check_ok "encrypt to two recipients" \
+    "$BINARY" encrypt -r "$A.pub" -r "$B.pub" "$TMPDIR/shared.txt" "$TMPDIR/shared.qsafe"
+"$BINARY" inspect "$TMPDIR/shared.qsafe" 2>/dev/null | grep -q "Recipients: 2" \
+    && pass "inspect reports 2 recipients" || fail "inspect reports 2 recipients"
+check_ok "alice can decrypt" \
+    env QSAFE_PASSPHRASE="alice-pass" "$BINARY" --key-file "$A" verify "$TMPDIR/shared.qsafe"
+check_ok "bob can decrypt" \
+    env QSAFE_PASSPHRASE="bob-pass" "$BINARY" --key-file "$B" verify "$TMPDIR/shared.qsafe"
+# A non-recipient key (the suite's main key) must NOT decrypt.
+check_fail "non-recipient cannot decrypt" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/shared.qsafe"
+
+# --- Test 14: detached signatures (ML-DSA-87) ---
+echo ""
+echo "[test: signatures]"
+SK="$TMPDIR/sign.bin"
+check_ok "sign-keygen succeeds" \
+    env QSAFE_PASSPHRASE="sign-pass" "$BINARY" sign-keygen --key-file "$SK"
+echo "document to be signed" > "$TMPDIR/doc.txt"
+check_ok "sign produces a signature" \
+    env QSAFE_PASSPHRASE="sign-pass" "$BINARY" sign --key-file "$SK" "$TMPDIR/doc.txt" "$TMPDIR/doc.sig"
+check_ok "verify-sig accepts a valid signature" \
+    "$BINARY" --key-file "$SK" verify-sig "$TMPDIR/doc.txt" "$TMPDIR/doc.sig"
+# Modify the document; the signature must no longer verify.
+echo "tampered" >> "$TMPDIR/doc.txt"
+check_fail "verify-sig rejects an altered document" \
+    "$BINARY" --key-file "$SK" verify-sig "$TMPDIR/doc.txt" "$TMPDIR/doc.sig"
+
+# --- Test 15: armored (base64) output ---
+echo ""
+echo "[test: armor]"
+echo "armor round-trip payload" > "$TMPDIR/armor.txt"
+check_ok "encrypt --armor produces text" \
+    "$BINARY" encrypt --armor --key-file "$KEYFILE" "$TMPDIR/armor.txt" "$TMPDIR/armor.asc"
+head -1 "$TMPDIR/armor.asc" 2>/dev/null | grep -q "BEGIN QSAFE MESSAGE" \
+    && pass "armor has PEM header" || fail "armor has PEM header"
+"$BINARY" decrypt --armor --key-file "$KEYFILE" "$TMPDIR/armor.asc" "$TMPDIR/armor.out" > /dev/null 2>&1
+if cmp -s "$TMPDIR/armor.txt" "$TMPDIR/armor.out"; then pass "armor round-trip matches"; else fail "armor round-trip matches"; fi
+# Armored pipe round-trip.
+"$BINARY" encrypt --armor --key-file "$KEYFILE" - < "$TMPDIR/armor.txt" 2>/dev/null \
+    | "$BINARY" decrypt --armor --key-file "$KEYFILE" - 2>/dev/null > "$TMPDIR/armor.pipe.out"
+if cmp -s "$TMPDIR/armor.txt" "$TMPDIR/armor.pipe.out"; then pass "armored pipe round-trip"; else fail "armored pipe round-trip"; fi
+
+# --- Test 16: no unverified plaintext released to a pipe ---
+echo ""
+echo "[test: no unverified plaintext to pipe]"
+# Decrypt a tampered ciphertext to stdout; auth must fail AND nothing may be
+# emitted (verify-before-release for the pipe path).
+"$BINARY" --key-file "$KEYFILE" decrypt - < "$TMPDIR/tampered.enc" > "$TMPDIR/pipe_tamper.out" 2>/dev/null
+rc=$?
+SZ=$(wc -c < "$TMPDIR/pipe_tamper.out" | tr -d ' ')
+[ "$rc" -ne 0 ] && pass "tampered pipe decrypt fails (nonzero exit)" || fail "tampered pipe decrypt fails (nonzero exit)"
+[ "$SZ" -eq 0 ] && pass "no plaintext emitted to pipe on auth failure" || fail "no plaintext emitted to pipe on auth failure (got $SZ bytes)"
+# Sanity: a valid ciphertext still round-trips correctly through the pipe.
+"$BINARY" --key-file "$KEYFILE" decrypt - < "$TMPDIR/test_input.enc" > "$TMPDIR/pipe_ok.out" 2>/dev/null
+check_ok "valid pipe decrypt still matches original" \
+    diff -q "$TMPDIR/test_input.txt" "$TMPDIR/pipe_ok.out"
 
 # --- Results ---
 echo ""
