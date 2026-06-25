@@ -39,8 +39,8 @@ jobs:
           sudo cp -r liboqs-install/lib/* /usr/local/lib/
           sudo ldconfig
 
-      - name: Build
-        run: make
+      - name: Build (warnings are errors)
+        run: make EXTRA_CFLAGS="-Werror"
 
       - name: Run tests
         run: make test

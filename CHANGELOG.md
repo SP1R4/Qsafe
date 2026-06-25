@@ -6,6 +6,10 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- CI quality gates: `-Werror` build, cppcheck static analysis (`quality.yml`).
+- `CONTRIBUTING.md` with build/test/static-analysis/security guidelines.
+
 ## [5.0.0] - 2026-06-25
 
 Major release. **Breaking:** the on-disk format is now `QSAFE005` and is
