@@ -363,15 +363,17 @@ qsafe --key-file project.key decrypt data.csv.qsafe
 
 ### Encrypted File
 
+`qsafe encrypt` writes the framed **QSAFE006** format; `qsafe decrypt` also
+reads the legacy **QSAFE005** format. The full byte-level spec for both is in
+[docs/FORMAT.md](docs/FORMAT.md).
+
 ```
 Offset       Size          Field
 -----------  ------------  ----------------------------
-0x0000       8 bytes       Version header ("QSAFE005")
+0x0000       8 bytes       Version header ("QSAFE006")
 0x0008       1 byte        recipient count (1..16)
-0x0009       12 bytes      payload GCM nonce (IV)
-0x0015       N * 1660      recipient records (see below)
-...          variable      AES-256-GCM ciphertext (metadata + data)
-EOF - 16     16 bytes      GCM authentication tag
+0x0009       N * 1660      recipient records (see below)
+...          variable      frame[0..k-1]: each is ciphertext ‖ 16-byte tag
 ```
 
 Each recipient record (1660 bytes) is:
@@ -384,14 +386,13 @@ wrapped content key (CEK)     32 bytes
 CEK wrap tag                  16 bytes
 ```
 
-The entire header — magic, recipient count, payload nonce, and every recipient
-record — is authenticated as GCM additional data, so tampering with any of it
-(including reordering or swapping records) is detected. The payload nonce sits
-near the front so decryption can stream from a pipe without seeking; the tag is
-the final 16 bytes of the stream.
-
-The AES ciphertext begins with a fixed **272-byte metadata block** (encrypted
-and authenticated alongside the data) before the file contents:
+The payload (a 272-byte metadata block followed by the file contents) is
+encrypted as a sequence of **64 KiB frames**, each its own AES-256-GCM segment
+keyed by a random per-file content key. The header (magic, recipient count, and
+every record) is authenticated as additional data on the first frame; each
+frame's nonce carries a counter and a final-frame flag, so reordering and
+truncation are detected. Every frame is verified before its plaintext is
+released — constant memory, no buffering. The metadata block is:
 
 ```
 Offset  Size       Field
@@ -404,8 +405,9 @@ Offset  Size       Field
 0x108   8 bytes    modification time (seconds, LE)
 ```
 
-**Per-file overhead:** 21 + (N × 1660) + 272 + 16 bytes for N recipients
-(e.g. 1969 bytes for a single recipient).
+**Per-file overhead:** 9 + (N × 1660) + 272 + 16·(frames) bytes for N
+recipients (a small single-recipient file is one frame: 9 + 1660 + 272 + 16 =
+1957 bytes of overhead). Each additional 64 KiB frame adds a 16-byte tag.
 
 ### Secret Key File (`secret_key.bin`)
 
@@ -499,7 +501,7 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the complete list. The most important
 
 - **Metadata leakage:** Qsafe does not pad, so the approximate plaintext size and the recipient *count* are visible. The filename, mode, and mtime are encrypted.
 - **No forward secrecy for long-term keys:** if a secret key (and passphrase) are later compromised, all past files encrypted to it can be decrypted.
-- **Streaming and authentication:** the auth tag is only checked at end-of-stream. For **pipe/stdout** output, Qsafe buffers plaintext in memory and releases it only after the tag verifies (so nothing is emitted on failure — at the cost of holding the payload in RAM; decrypt large inputs to a file). For **file** output it streams and deletes the result on failure. Always check the exit code before treating output as authentic.
+- **Streaming and authentication:** QSAFE006 is framed — the payload is a sequence of 64 KiB frames, each authenticated independently, so every frame's plaintext is released only after that frame verifies, in constant memory for both files and pipes. Caveat: for a multi-frame file, earlier (authenticated) frames are released before a later corrupt frame is detected, so a verified *prefix* may already be emitted on failure — check the exit code. (Legacy QSAFE005 files buffer the whole pipe payload instead.)
 - **`--passphrase` on the CLI** is visible in the process list / shell history; prefer the prompt, `$QSAFE_PASSPHRASE`, or `--passphrase-file`.
 
 ---

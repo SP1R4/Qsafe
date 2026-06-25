@@ -1,6 +1,12 @@
 # Qsafe On-Disk Format Specification
 
-Version: **QSAFE005** (Qsafe 5.x) · Status: stable
+Current write format: **QSAFE006** (framed AEAD) · Also readable: **QSAFE005** · Status: stable
+
+`qsafe encrypt` always writes QSAFE006. `qsafe decrypt` accepts both QSAFE006
+and QSAFE005, so files produced by Qsafe 5.0 are not stranded. The two formats
+share the header's recipient records, key wrap, metadata block, key files,
+signatures, and armor; they differ only in how the payload is laid out (§2 vs
+§2-legacy).
 
 This document specifies the byte layout and cryptographic construction of every
 file Qsafe writes, precisely enough to build an interoperable implementation
@@ -44,18 +50,17 @@ Constants used throughout: `NONCE = 12`, `TAG = 16`, `KEY = 32`, `CEK = 32`,
 ```
 offset  size                       field
 ------  -------------------------  ---------------------------------
-0       8                          magic = "QSAFE005" (ASCII)
+0       8                          magic = "QSAFE006" (ASCII)
 8       1                          recipient_count R   (1..16)
-9       12                         payload_nonce        (AES-GCM IV)
-21      R * 1660                    recipient_record[0..R-1]  (see 2.2)
-21+RR   variable                   payload_ciphertext   (see 2.3)
-EOF-16  16                         payload_tag          (AES-GCM tag)
+9       R * 1660                    recipient_record[0..R-1]  (see 2.2)
+9+RR    variable                   frame[0..k-1]        (see 2.3)
 ```
 
-`RR = R * 1660`. The bytes from offset `0` to the start of `payload_ciphertext`
-(i.e. `magic ‖ recipient_count ‖ payload_nonce ‖ all recipient_records`,
-length `21 + RR`) are the **header** and are authenticated as AEAD Additional
-Authenticated Data (AAD) for the payload — see 2.3.
+`RR = R * 1660`. The **header** `H = magic ‖ recipient_count ‖ all
+recipient_records` (length `9 + RR`) is authenticated as AEAD Additional
+Authenticated Data (AAD) on the first payload frame (§2.3). Unlike the legacy
+v5 format (§2-legacy), there is no single payload nonce field — each frame
+derives its own nonce from a counter.
 
 `recipient_count` MUST be in `1..16`. A value of `0` or `> 16` MUST be rejected.
 
@@ -73,29 +78,42 @@ offset  size    field
 
 Record size = `32 + 1568 + 12 + 32 + 16 = 1660`.
 
-### 2.3 Cryptographic construction (encryption)
+### 2.3 Cryptographic construction (encryption) — framed payload
 
-Let `recipient_pub[i] = x25519_pub[i] ‖ mlkem_pub[i]` (see §4).
+The payload `P = META ‖ file_contents` (§3 for META) is split into frames of
+`FRAME = 65536` plaintext bytes and each frame is sealed independently. This
+gives constant-memory streaming *and* per-frame verify-before-release.
 
-1. Generate a random 32-byte **content-encryption key** `CEK` and a random
-   12-byte `payload_nonce`. (One CEK per file.)
-2. Build the metadata block `META` (§5).
-3. For each recipient `i`, wrap `CEK` into `recipient_record[i]` (§2.4).
-4. Form the header `H = magic ‖ R ‖ payload_nonce ‖ record[0] ‖ … ‖ record[R-1]`.
-5. AEAD-encrypt the payload:
-   ```
-   AES-256-GCM:
-     key   = CEK
-     iv    = payload_nonce
-     aad   = H                       (the entire header)
-     pt    = META ‖ file_contents
-   -> payload_ciphertext, payload_tag
-   ```
-6. Write `H ‖ payload_ciphertext ‖ payload_tag`.
+```
+1. Generate a random 32-byte content-encryption key CEK. (One per file.)
+2. For each recipient i, wrap CEK into recipient_record[i] (§2.4).
+3. H = magic ‖ recipient_count ‖ record[0] ‖ … ‖ record[R-1].   # 9 + RR bytes
+4. Write H.
+5. Split P into chunks of FRAME bytes. Read chunks until a read returns fewer
+   than FRAME bytes (0..FRAME-1) — that short/empty chunk is the FINAL frame.
+   For frame index c (from 0):
+       nonce_c = 0x00 0x00 0x00 ‖ uint64_be(c) ‖ (c is final ? 0x01 : 0x00)   # 12 bytes
+       aad_c   = (c == 0) ? H : (empty)
+       ct_c, tag_c = AES-256-GCM(key=CEK, iv=nonce_c, aad=aad_c, pt=chunk_c)
+       write ct_c ‖ tag_c                     # ct_c has the same length as chunk_c
+```
 
-Because the whole header is AAD, any reordering, substitution, truncation, or
-edit of the magic, recipient count, nonce, or any record causes authentication
-to fail.
+Framing rule (so the reader needs no length prefix): every non-final frame
+carries exactly `FRAME` plaintext bytes, so on the wire it is exactly
+`FRAME + 16` bytes. The single final frame carries `0..FRAME-1` plaintext bytes,
+so it is always **strictly shorter** than `FRAME + 16`. If the plaintext length
+is an exact multiple of `FRAME`, the final frame is empty (0 plaintext, 16-byte
+tag).
+
+Security of the framing:
+- `CEK` is random per file, so the deterministic counter nonce is unique per key.
+- The counter binds frame **order**; reordering or duplicating a frame changes
+  its expected nonce and the tag fails.
+- The final-frame flag in the nonce plus the "non-final frames are full" rule
+  makes **truncation** (a missing final frame) and **extension** (data after the
+  final frame) detectable: a reader that hits EOF right after a full frame, or
+  finds a full frame where it expected the short final one, MUST reject.
+- `H` is bound into frame 0, so the recipient set and count are authenticated.
 
 ### 2.4 Per-recipient key wrap
 
@@ -121,26 +139,36 @@ Notes:
   record as a whole is additionally bound into the payload tag via the header AAD.
 - `IKM` is exactly 64 bytes (`32 + 32`) for these algorithms.
 
-### 2.5 Decryption procedure
+### 2.5 Decryption procedure (framed)
 
 ```
-1. Read magic(8); reject if != "QSAFE005".
+1. Read magic(8). If "QSAFE006" -> framed (this section). If "QSAFE005" ->
+   legacy (§2-legacy). Otherwise reject.
 2. Read R = u8; reject if R == 0 or R > 16.
-3. Read payload_nonce(12).
-4. Read R recipient records (R * 1660 bytes); reject if truncated.
-5. For each record, attempt to recover the CEK (§2.6). The first record whose
-   wrap_tag verifies yields the CEK. If none verify, this key is not a recipient
-   -> reject.
-6. AEAD-decrypt the payload with key=CEK, iv=payload_nonce, aad=H (the exact
-   header bytes read in steps 1-4). The trailing 16 bytes of the file are
-   payload_tag.
-7. Verify payload_tag. Only after it verifies, treat the first 272 plaintext
-   bytes as META (§5) and the remainder as the file contents.
+3. Read R recipient records (R * 1660 bytes); reject if truncated.
+4. Recover CEK from whichever record is ours (§2.6); reject if none.
+5. For frame index c = 0, 1, ...:
+     read up to FRAME+16 bytes into buf.
+       got == FRAME+16  -> non-final frame (last=0). If EOF follows with no
+                           further frame, the file is truncated -> reject.
+       16 <= got < FRAME+16 -> FINAL frame (last=1).
+       got < 16          -> truncated/garbage -> reject.
+     nonce_c = 0x000000 ‖ uint64_be(c) ‖ (last ? 0x01 : 0x00)
+     aad_c   = (c == 0) ? H : empty
+     pt_c    = AES-256-GCM-Open(CEK, nonce_c, aad_c, ct=buf[0..got-16], tag=buf[got-16..got])
+     if Open fails -> reject (corrupt / wrong key / reordered / wrong final flag)
+     release pt_c     # already authenticated
+     if last: stop.
+6. The first 272 released plaintext bytes are META (§3); the rest is the file.
 ```
 
-Implementations SHOULD NOT release plaintext to an irreversible sink (a pipe) or
-act on parsed metadata before step 7 succeeds. Qsafe buffers pipe output until
-the tag verifies, and removes a partial output file on failure.
+Because each frame is authenticated *before* its plaintext is released, a pipe
+consumer never receives unverified bytes and no whole-payload buffering is
+needed. **Caveat:** for a multi-frame file, earlier frames are released before a
+later corrupt/truncated frame is detected — every released byte was
+authenticated, but a failure partway through means a verified *prefix* may
+already have been emitted. A single-frame (small) file is therefore all-or-
+nothing; a large file is prefix-or-error. File outputs are removed on failure.
 
 ### 2.6 Per-recipient unwrap (decryption)
 
@@ -157,6 +185,29 @@ CEK      = AES-256-GCM-Open(key=KEK, iv=record.wrap_nonce,
 If `AES-256-GCM-Open` fails (tag mismatch), this record is not for us. ML-KEM
 implicit rejection means a tampered `mlkem_ct` yields a different `kem_ss`, hence
 a wrong `KEK`, hence a wrap-tag failure — so tampering is caught here.
+
+### 2-legacy. QSAFE005 (readable, never written)
+
+Qsafe 5.0 produced a non-framed format. `qsafe decrypt` still reads it. It
+differs from §2 only in the header and payload:
+
+```
+offset  size        field
+------  ----------  ---------------------------------
+0       8           magic = "QSAFE005"
+8       1           recipient_count R
+9       12          payload_nonce
+21      R * 1660    recipient_record[0..R-1]      (identical structure to §2.2)
+21+RR   variable    payload_ciphertext            (AES-256-GCM of META ‖ file)
+EOF-16  16          payload_tag
+```
+
+The whole payload is a single AES-256-GCM:
+`key = CEK`, `iv = payload_nonce`, `aad = H = magic ‖ count ‖ payload_nonce ‖
+records`, `pt = META ‖ file`. The 16-byte tag is the trailing bytes; a decoder
+holds back the last 16 bytes while streaming and verifies at EOF (so unverified
+plaintext must be buffered before release on a pipe — the limitation §2 removes).
+Key wrap (§2.4) and unwrap (§2.6) are identical.
 
 ---
 
@@ -305,10 +356,13 @@ For an encryption identity this is over the 1600-byte hybrid public blob (§4.1)
 
 ## 9. Versioning and compatibility
 
-- The 8-byte magic identifies the format: `QSAFE005` (files), `QSAFEK01`
-  (secret-key files). A reader MUST reject an unrecognized magic.
-- `QSAFE005` is intentionally incompatible with `QSAFE004` and earlier. Any
-  change to a layout or construction in this document is a breaking change and
-  MUST bump the corresponding magic.
+- The 8-byte magic identifies the format: `QSAFE006` (current, framed) and
+  `QSAFE005` (legacy, still readable) for files; `QSAFEK01` for secret-key
+  files. A reader MUST reject an unrecognized magic.
+- `qsafe encrypt` writes `QSAFE006`; `qsafe decrypt` accepts `QSAFE006` and
+  `QSAFE005`. Both are intentionally incompatible with `QSAFE004` and earlier.
+- Any change to a layout or construction in this document is a breaking change
+  and MUST bump the corresponding magic. (`QSAFE006` added framing over
+  `QSAFE005` to gain constant-memory verify-before-release.)
 - Known-answer vectors for the deterministic primitives (SHA-256 fingerprint,
   HKDF-SHA256, scrypt) are in `tests/test_crypto_utils.c`.

@@ -7,6 +7,12 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Framed AEAD (QSAFE006):** encrypt now writes a framed format — the payload
+  is a sequence of 64 KiB AES-256-GCM frames (counter+final-flag nonces), giving
+  constant-memory streaming *and* verify-before-release (no whole-payload
+  buffering), with truncation/reordering detection.
+- Dual-read: decrypt accepts both QSAFE006 and the legacy QSAFE005, verified by
+  an interop test fixture produced by the v5.0.0 binary.
 - CI quality gates: `-Werror` build, cppcheck static analysis (`quality.yml`).
 - `CONTRIBUTING.md` with build/test/static-analysis/security guidelines.
 - `docs/FORMAT.md`: complete byte-level on-disk format specification.

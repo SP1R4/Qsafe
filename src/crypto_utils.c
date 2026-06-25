@@ -501,21 +501,19 @@ crypto_error_t crypto_inspect_file(const char *filename, OQS_KEM *kem, const cry
     printf("File: %s\n", filename);
     printf("Size: %zu bytes\n", file_size);
 
-    /* Encrypted QSAFE v5 container? */
-    if (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER, VERSION_HEADER_SIZE) == 0) {
+    /* Encrypted QSAFE container (v6 = framed, v5 = single-AEAD)? */
+    int v6 = (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER_V6, VERSION_HEADER_SIZE) == 0);
+    int v5 = (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER, VERSION_HEADER_SIZE) == 0);
+    if (v5 || v6) {
         printf("Type: encrypted file (%.*s)\n", VERSION_HEADER_SIZE, (const char *)prefix);
         printf("KEM:  hybrid X25519 + %s\n", OQS_KEM_alg_ml_kem_1024);
-        printf("AEAD: AES-256-GCM (nonce %d, tag %d bytes)\n", AES_GCM_NONCE_SIZE, AES_GCM_TAG_SIZE);
-        if (got == sizeof(prefix)) {
-            unsigned n = prefix[VERSION_HEADER_SIZE];
-            size_t record_size = X25519_KEY_SIZE + kem->length_ciphertext +
-                                 AES_GCM_NONCE_SIZE + QSAFE_CEK_SIZE + AES_GCM_TAG_SIZE;
-            size_t overhead = sizeof(prefix) + (size_t)n * record_size + AES_GCM_TAG_SIZE;
-            printf("Recipients: %u\n", n);
-            if (file_size >= overhead) {
-                printf("Encrypted payload: %zu bytes (includes %d-byte metadata block)\n",
-                       file_size - overhead, QSAFE_META_SIZE);
-            }
+        if (v6) {
+            printf("AEAD: AES-256-GCM, framed (%d-byte frames)\n", QSAFE_FRAME_SIZE);
+        } else {
+            printf("AEAD: AES-256-GCM (nonce %d, tag %d bytes)\n", AES_GCM_NONCE_SIZE, AES_GCM_TAG_SIZE);
+        }
+        if (got > VERSION_HEADER_SIZE) {
+            printf("Recipients: %u\n", (unsigned)prefix[VERSION_HEADER_SIZE]);
         }
         return CRYPTO_SUCCESS;
     }
@@ -748,6 +746,59 @@ static int gcm_open(const unsigned char key[AES_KEY_SIZE], const unsigned char n
     return ok;
 }
 
+/* --- framed-AEAD (v6) helpers --- */
+
+/* Builds the 12-byte nonce for frame `counter`: 3 zero bytes, an 8-byte
+ * big-endian counter, and a final byte that is 1 on the last frame else 0.
+ * The content key is random per file, so this deterministic per-frame nonce is
+ * unique under that key; the counter binds frame order and the final flag makes
+ * truncation (a missing final frame) detectable. */
+static void frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]) {
+    memset(nonce, 0, AES_GCM_NONCE_SIZE);
+    for (int i = 0; i < 8; i++) {
+        nonce[3 + i] = (unsigned char)((counter >> (8 * (7 - i))) & 0xff);
+    }
+    nonce[11] = last ? 0x01 : 0x00;
+}
+
+/* AES-256-GCM seal/open of one frame, with optional additional authenticated
+ * data. ct must have room for ptlen bytes; tag is 16 bytes. */
+static int gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+                        const unsigned char *aad, size_t aadlen,
+                        const unsigned char *pt, int ptlen, unsigned char *ct, unsigned char tag[AES_GCM_TAG_SIZE]) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return 0;
+    int len, ok = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
+        EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) == 1 &&
+        (aadlen == 0 || EVP_EncryptUpdate(ctx, NULL, &len, aad, (int)aadlen) == 1) &&
+        EVP_EncryptUpdate(ctx, ct, &len, pt, ptlen) == 1 &&
+        EVP_EncryptFinal_ex(ctx, ct + len, &len) == 1 &&
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, AES_GCM_TAG_SIZE, tag) == 1) {
+        ok = 1;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+}
+
+static int gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+                        const unsigned char *aad, size_t aadlen,
+                        const unsigned char *ct, int ctlen, const unsigned char tag[AES_GCM_TAG_SIZE], unsigned char *pt) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return 0;
+    int len, ok = 0;
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
+        EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) == 1 &&
+        (aadlen == 0 || EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aadlen) == 1) &&
+        EVP_DecryptUpdate(ctx, pt, &len, ct, ctlen) == 1 &&
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AES_GCM_TAG_SIZE, (void *)tag) == 1 &&
+        EVP_DecryptFinal_ex(ctx, pt + len, &len) == 1) {
+        ok = 1;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+}
+
 crypto_error_t crypto_generate_identity(OQS_KEM *kem,
                                         unsigned char **public_blob, size_t *public_len,
                                         unsigned char **secret_blob, size_t *secret_len) {
@@ -859,11 +910,10 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
                                    const crypto_config_t *config) {
 
     crypto_error_t ret = CRYPTO_ERR_CRYPTO;
-    unsigned char *header = NULL;      /* magic | count | payload_nonce | records */
+    unsigned char *header = NULL;      /* magic | count | records (v6: no payload nonce) */
     size_t header_len = 0;
-    unsigned char *in_buffer = NULL;
-    unsigned char *out_buffer = NULL;
-    EVP_CIPHER_CTX *ctx = NULL;
+    unsigned char *frame_pt = NULL;    /* one plaintext frame */
+    unsigned char *frame_ct = NULL;    /* one ciphertext frame */
     FILE *in_file = NULL;
     FILE *out_file = NULL;
     int output_created = 0;
@@ -907,25 +957,24 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         }
     }
 
-    /* Random content key (encrypts the payload) and the payload AEAD nonce. */
-    if (RAND_bytes(cek, QSAFE_CEK_SIZE) != 1 || RAND_bytes(nonce, AES_GCM_NONCE_SIZE) != 1) {
-        fprintf(stderr, "Error: Failed to generate random key/nonce\n");
+    /* Random content key; per-frame nonces are derived from a counter (§ frame_nonce). */
+    if (RAND_bytes(cek, QSAFE_CEK_SIZE) != 1) {
+        fprintf(stderr, "Error: Failed to generate random key\n");
         goto cleanup;
     }
 
-    in_buffer = malloc(BUFFER_SIZE);
-    out_buffer = malloc(BUFFER_SIZE + AES_BLOCK_SIZE);
-    if (!in_buffer || !out_buffer) {
+    frame_pt = malloc(QSAFE_FRAME_SIZE);
+    frame_ct = malloc(QSAFE_FRAME_SIZE);
+    if (!frame_pt || !frame_ct) {
         fprintf(stderr, "Error: Failed to allocate memory\n");
         ret = CRYPTO_ERR_MEMORY;
         goto cleanup;
     }
 
-    /* Assemble the authenticated header:
-     *   magic(8) | recipient_count(1) | payload_nonce(12) | record[0..R-1] */
+    /* Header: magic(8) | recipient_count(1) | record[0..R-1]. */
     size_t record_size = X25519_KEY_SIZE + kem->length_ciphertext +
                          AES_GCM_NONCE_SIZE + QSAFE_CEK_SIZE + AES_GCM_TAG_SIZE;
-    size_t prefix = VERSION_HEADER_SIZE + 1 + AES_GCM_NONCE_SIZE;
+    size_t prefix = VERSION_HEADER_SIZE + 1;
     header_len = prefix + n_recipients * record_size;
     header = malloc(header_len);
     if (!header) {
@@ -933,9 +982,8 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         ret = CRYPTO_ERR_MEMORY;
         goto cleanup;
     }
-    memcpy(header, VERSION_HEADER, VERSION_HEADER_SIZE);
+    memcpy(header, VERSION_HEADER_V6, VERSION_HEADER_SIZE);
     header[VERSION_HEADER_SIZE] = (unsigned char)n_recipients;
-    memcpy(header + VERSION_HEADER_SIZE + 1, nonce, AES_GCM_NONCE_SIZE);
     for (size_t i = 0; i < n_recipients; i++) {
         unsigned char *rec = header + prefix + i * record_size;
         crypto_error_t wr = hybrid_wrap_cek(kem, recipient_pubs[i], cek, rec);
@@ -944,26 +992,6 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
             ret = wr;
             goto cleanup;
         }
-    }
-
-    ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        crypto_handle_errors();
-        goto cleanup;
-    }
-
-    int len;
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
-        EVP_EncryptInit_ex(ctx, NULL, NULL, cek, nonce) != 1) {
-        crypto_handle_errors();
-        goto cleanup;
-    }
-
-    /* Authenticate the entire header (magic, recipient count, nonce, and every
-     * recipient record) as additional data, binding it to the payload tag. */
-    if (EVP_EncryptUpdate(ctx, NULL, &len, header, (int)header_len) != 1) {
-        crypto_handle_errors();
-        goto cleanup;
     }
 
     if (!crypto_should_write(output_filename, config)) {
@@ -980,92 +1008,79 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
     }
     output_created = !is_stream_arg(output_filename);
 
-    /* File header: magic | recipient count | payload nonce | recipient records. */
     if (fwrite(header, 1, header_len, out_file) != header_len) {
         fprintf(stderr, "Error: Failed to write file header\n");
         ret = CRYPTO_ERR_FILE_IO;
         goto cleanup;
     }
 
-    /* The metadata block is the first plaintext encrypted into the stream. */
-    if (EVP_EncryptUpdate(ctx, out_buffer, &len, meta, QSAFE_META_SIZE) != 1) {
-        fprintf(stderr, "Error: AES-GCM encryption failed\n");
-        crypto_handle_errors();
-        goto cleanup;
-    }
-    if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
-        fprintf(stderr, "Error: Failed to write to output file\n");
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-
-    size_t total_processed = 0;
-    size_t last_report = 0;
-    while (1) {
-        size_t bytes_read = fread(in_buffer, 1, BUFFER_SIZE, in_file);
-        if (bytes_read == 0) {
+    /* Plaintext stream = metadata block followed by the file contents, emitted
+     * as authenticated frames. A full QSAFE_FRAME_SIZE read is a non-final
+     * frame; the first short/empty read ends the stream as the final frame, so
+     * the final frame is always strictly shorter on the wire than a full one. */
+    {
+        size_t meta_off = 0;
+        uint64_t ctr = 0;
+        size_t total_processed = 0, last_report = 0;
+        int done = 0;
+        while (!done) {
+            size_t filled = 0;
+            if (meta_off < QSAFE_META_SIZE) {
+                size_t take = QSAFE_META_SIZE - meta_off;
+                if (take > QSAFE_FRAME_SIZE) take = QSAFE_FRAME_SIZE;
+                memcpy(frame_pt, meta + meta_off, take);
+                meta_off += take;
+                filled = take;
+            }
+            while (filled < QSAFE_FRAME_SIZE) {
+                size_t n = fread(frame_pt + filled, 1, QSAFE_FRAME_SIZE - filled, in_file);
+                if (n == 0) break;
+                filled += n;
+            }
             if (ferror(in_file)) {
                 fprintf(stderr, "Error: Failed to read input file\n");
                 ret = CRYPTO_ERR_FILE_IO;
                 goto cleanup;
             }
-            break;
+
+            int last = (filled < QSAFE_FRAME_SIZE) ? 1 : 0;
+            frame_nonce(ctr, last, nonce);
+            /* Bind the header into the first frame only; the counter+flag nonce
+             * orders the rest and makes truncation detectable. */
+            const unsigned char *aad = (ctr == 0) ? header : NULL;
+            size_t aadlen = (ctr == 0) ? header_len : 0;
+            if (!gcm_seal_aad(cek, nonce, aad, aadlen, frame_pt, (int)filled, frame_ct, tag)) {
+                fprintf(stderr, "Error: AES-GCM frame encryption failed\n");
+                crypto_handle_errors();
+                goto cleanup;
+            }
+            if ((filled > 0 && fwrite(frame_ct, 1, filled, out_file) != filled) ||
+                fwrite(tag, 1, AES_GCM_TAG_SIZE, out_file) != AES_GCM_TAG_SIZE) {
+                fprintf(stderr, "Error: Failed to write frame\n");
+                ret = CRYPTO_ERR_FILE_IO;
+                goto cleanup;
+            }
+            ctr++;
+            if (last) done = 1;
+
+            if (have_size) {
+                total_processed += filled;
+                if (total_processed - last_report >= (1u << 20)) {
+                    crypto_print_progress_bar(total_processed, file_size + QSAFE_META_SIZE);
+                    last_report = total_processed;
+                }
+            }
         }
-
-        if (EVP_EncryptUpdate(ctx, out_buffer, &len, in_buffer, (int)bytes_read) != 1) {
-            fprintf(stderr, "Error: AES-GCM encryption failed\n");
-            crypto_handle_errors();
-            goto cleanup;
-        }
-
-        if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
-            fprintf(stderr, "Error: Failed to write to output file\n");
-            ret = CRYPTO_ERR_FILE_IO;
-            goto cleanup;
-        }
-
-        total_processed += bytes_read;
-        if (have_size && (total_processed - last_report >= (1u << 20) || total_processed == file_size)) {
-            crypto_print_progress_bar(total_processed, file_size);
-            last_report = total_processed;
-        }
-    }
-
-    if (EVP_EncryptFinal_ex(ctx, out_buffer, &len) != 1) {
-        fprintf(stderr, "Error: AES-GCM encryption finalization failed\n");
-        crypto_handle_errors();
-        goto cleanup;
-    }
-    if (len > 0 && fwrite(out_buffer, 1, len, out_file) != (size_t)len) {
-        fprintf(stderr, "Error: Failed to write final chunk\n");
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, AES_GCM_TAG_SIZE, tag) != 1) {
-        fprintf(stderr, "Error: Failed to get GCM tag\n");
-        crypto_handle_errors();
-        goto cleanup;
-    }
-
-    /* The tag is the trailing 16 bytes of the stream. */
-    if (fwrite(tag, 1, AES_GCM_TAG_SIZE, out_file) != AES_GCM_TAG_SIZE) {
-        fprintf(stderr, "Error: Failed to write authentication tag\n");
-        ret = CRYPTO_ERR_FILE_IO;
-        goto cleanup;
-    }
-    if (have_size && file_size > 0) {
-        fprintf(stderr, "\n");
+        if (have_size && file_size > 0) fprintf(stderr, "\n");
     }
 
     ret = CRYPTO_SUCCESS;
 
 cleanup:
-    if (ctx) EVP_CIPHER_CTX_free(ctx);
     close_stream(in_file);
     close_stream(out_file);
-    free(in_buffer);
-    free(out_buffer);
+    if (frame_pt) { OPENSSL_cleanse(frame_pt, QSAFE_FRAME_SIZE); free(frame_pt); }
+    free(frame_ct);
     free(header); /* records hold only public material; the CEK is cleansed below */
     OPENSSL_cleanse(cek, sizeof(cek));
     if (ret != CRYPTO_SUCCESS && output_created) {
@@ -1091,6 +1106,7 @@ typedef struct {
     int to_stdout;
     int skipped;
     int verify_only;          /* authenticate without writing any plaintext */
+    int frame_verified;       /* v6: input is verified per-frame, so never defer */
     char out_path[MAX_PATH_LENGTH];
 
     /* When the output is a pipe/stdout, decrypted plaintext is held in this
@@ -1118,7 +1134,9 @@ static crypto_error_t dec_sink_open(dec_sink_t *s) {
     if (is_stream_arg(s->output_arg)) {
         s->to_stdout = 1;
         s->out = stdout;
-        s->defer = 1; /* buffer plaintext until the tag verifies */
+        /* v5 buffers stdout until the single tag verifies; v6 verifies each
+         * frame before release, so it can stream straight through. */
+        s->defer = s->frame_verified ? 0 : 1;
         return CRYPTO_SUCCESS;
     }
 
@@ -1239,19 +1257,22 @@ static crypto_error_t dec_sink_commit(dec_sink_t *s) {
 crypto_error_t crypto_decrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem,
                                    const unsigned char *secret_blob, const crypto_config_t *config) {
     crypto_error_t ret = CRYPTO_ERR_CRYPTO;
-    unsigned char *header = NULL;     /* magic | count | nonce | records (for AAD) */
-    unsigned char *in_buffer = NULL;
-    unsigned char *out_buffer = NULL;
-    unsigned char *work = NULL;
+    unsigned char *header = NULL;     /* exact header bytes, re-fed as AAD */
+    unsigned char *in_buffer = NULL;  /* v5 */
+    unsigned char *out_buffer = NULL; /* v5 */
+    unsigned char *work = NULL;       /* v5 */
+    unsigned char *cbuf = NULL;       /* v6: one ciphertext frame */
+    unsigned char *pbuf = NULL;       /* v6: one plaintext frame */
     EVP_CIPHER_CTX *ctx = NULL;
     FILE *in_file = NULL;
     unsigned char nonce[AES_GCM_NONCE_SIZE];
     unsigned char tag[AES_GCM_TAG_SIZE];
     unsigned char hold[AES_GCM_TAG_SIZE];
     unsigned char cek[QSAFE_CEK_SIZE];
+    unsigned char magic[VERSION_HEADER_SIZE];
     int have_cek = 0;
+    int is_v6 = 0;
     size_t holdn = 0;
-    unsigned char prefix_buf[VERSION_HEADER_SIZE + 1 + AES_GCM_NONCE_SIZE];
 
     dec_sink_t sink;
     memset(&sink, 0, sizeof(sink));
@@ -1265,49 +1286,65 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         return CRYPTO_ERR_FILE_IO;
     }
 
-    in_buffer = malloc(BUFFER_SIZE);
-    out_buffer = malloc(BUFFER_SIZE + AES_BLOCK_SIZE);
-    work = malloc(BUFFER_SIZE + AES_GCM_TAG_SIZE);
-    if (!in_buffer || !out_buffer || !work) {
-        fprintf(stderr, "Error: Failed to allocate memory\n");
-        ret = CRYPTO_ERR_MEMORY;
-        goto cleanup;
-    }
-
-    /* Fixed prefix: magic | recipient_count | payload_nonce. */
-    if (fread(prefix_buf, 1, sizeof(prefix_buf), in_file) != sizeof(prefix_buf) ||
-        memcmp(prefix_buf, VERSION_HEADER, VERSION_HEADER_SIZE) != 0) {
+    /* Identify the format by its 8-byte magic (v6 = framed, v5 = single-AEAD). */
+    if (fread(magic, 1, sizeof(magic), in_file) != sizeof(magic)) {
         fprintf(stderr, "Error: Invalid file format or version\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
-    size_t n_recipients = prefix_buf[VERSION_HEADER_SIZE];
+    if (memcmp(magic, VERSION_HEADER_V6, VERSION_HEADER_SIZE) == 0) {
+        is_v6 = 1;
+    } else if (memcmp(magic, VERSION_HEADER, VERSION_HEADER_SIZE) == 0) {
+        is_v6 = 0;
+    } else {
+        fprintf(stderr, "Error: Invalid file format or version\n");
+        ret = CRYPTO_ERR_INVALID_INPUT;
+        goto cleanup;
+    }
+
+    unsigned char cnt;
+    if (fread(&cnt, 1, 1, in_file) != 1) {
+        fprintf(stderr, "Error: truncated header\n");
+        ret = CRYPTO_ERR_INVALID_INPUT;
+        goto cleanup;
+    }
+    size_t n_recipients = cnt;
     if (n_recipients == 0 || n_recipients > QSAFE_MAX_RECIPIENTS) {
         fprintf(stderr, "Error: invalid recipient count in header\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
-    memcpy(nonce, prefix_buf + VERSION_HEADER_SIZE + 1, AES_GCM_NONCE_SIZE);
 
-    /* Read all recipient records into the contiguous header buffer so the exact
-     * header bytes can be re-fed as additional data. */
     size_t record_size = X25519_KEY_SIZE + kem->length_ciphertext +
                          AES_GCM_NONCE_SIZE + QSAFE_CEK_SIZE + AES_GCM_TAG_SIZE;
-    size_t prefix = sizeof(prefix_buf);
+
+    /* Reconstruct the exact header bytes for AAD:
+     *   v5: magic(8) | count(1) | payload_nonce(12) | records
+     *   v6: magic(8) | count(1) | records                          */
+    size_t prefix = VERSION_HEADER_SIZE + 1 + (is_v6 ? 0 : AES_GCM_NONCE_SIZE);
     size_t header_len = prefix + n_recipients * record_size;
     header = malloc(header_len);
     if (!header) {
         ret = CRYPTO_ERR_MEMORY;
         goto cleanup;
     }
-    memcpy(header, prefix_buf, prefix);
+    memcpy(header, magic, VERSION_HEADER_SIZE);
+    header[VERSION_HEADER_SIZE] = cnt;
+    if (!is_v6) {
+        if (fread(header + VERSION_HEADER_SIZE + 1, 1, AES_GCM_NONCE_SIZE, in_file) != AES_GCM_NONCE_SIZE) {
+            fprintf(stderr, "Error: truncated header\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        memcpy(nonce, header + VERSION_HEADER_SIZE + 1, AES_GCM_NONCE_SIZE);
+    }
     if (fread(header + prefix, 1, n_recipients * record_size, in_file) != n_recipients * record_size) {
         fprintf(stderr, "Error: Failed to read recipient records (truncated file?)\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
 
-    /* Try each record until one unwraps the CEK with our hybrid secret. */
+    /* Recover the content key from whichever record is ours. */
     for (size_t i = 0; i < n_recipients; i++) {
         if (hybrid_unwrap_cek(kem, secret_blob, header + prefix + i * record_size, cek)) {
             have_cek = 1;
@@ -1320,87 +1357,113 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        fprintf(stderr, "Error: Failed to create cipher context\n");
-        goto cleanup;
-    }
+    if (is_v6) {
+        /* --- framed payload: verify each frame, then release it (constant
+         * memory, and no unverified bytes ever reach the output). --- */
+        sink.frame_verified = 1;
+        cbuf = malloc(QSAFE_FRAME_SIZE + AES_GCM_TAG_SIZE);
+        pbuf = malloc(QSAFE_FRAME_SIZE);
+        if (!cbuf || !pbuf) { ret = CRYPTO_ERR_MEMORY; goto cleanup; }
 
-    int len;
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
-        EVP_DecryptInit_ex(ctx, NULL, NULL, cek, nonce) != 1) {
-        fprintf(stderr, "Error: Failed to initialize decryption\n");
-        crypto_handle_errors();
-        goto cleanup;
-    }
-
-    /* Feed the same additional data the encryptor authenticated (the header). */
-    if (EVP_DecryptUpdate(ctx, NULL, &len, header, (int)header_len) != 1) {
-        crypto_handle_errors();
-        goto cleanup;
-    }
-
-    /* Stream the remaining bytes, always holding back the final 16 (the tag).
-     * This works identically for files and pipes since we never seek. */
-    while (1) {
-        size_t bytes_read = fread(in_buffer, 1, BUFFER_SIZE, in_file);
-        if (bytes_read == 0) {
+        uint64_t ctr = 0;
+        int saw_final = 0;
+        while (!saw_final) {
+            size_t want = QSAFE_FRAME_SIZE + AES_GCM_TAG_SIZE;
+            size_t n = 0, r;
+            while (n < want && (r = fread(cbuf + n, 1, want - n, in_file)) > 0) n += r;
             if (ferror(in_file)) {
                 fprintf(stderr, "Error: Failed to read ciphertext\n");
                 ret = CRYPTO_ERR_FILE_IO;
                 goto cleanup;
             }
-            break; /* EOF */
+            /* A full read is a non-final frame; a short read is the final frame.
+             * Anything smaller than a bare tag is truncated/garbage. */
+            if (n < AES_GCM_TAG_SIZE) {
+                fprintf(stderr, "Error: Truncated or invalid encrypted file\n");
+                ret = CRYPTO_ERR_INVALID_INPUT;
+                goto cleanup;
+            }
+            int last = (n < want) ? 1 : 0;
+            size_t ptlen = n - AES_GCM_TAG_SIZE;
+            frame_nonce(ctr, last, nonce);
+            const unsigned char *aad = (ctr == 0) ? header : NULL;
+            size_t aadlen = (ctr == 0) ? header_len : 0;
+            if (!gcm_open_aad(cek, nonce, aad, aadlen, cbuf, (int)ptlen, cbuf + ptlen, pbuf)) {
+                fprintf(stderr, "Error: Authentication failed - file corrupt or wrong key\n");
+                ret = CRYPTO_ERR_INTEGRITY;
+                goto cleanup;
+            }
+            crypto_error_t wr = dec_sink_write(&sink, pbuf, ptlen);
+            if (wr != CRYPTO_SUCCESS) { ret = wr; goto cleanup; }
+            ctr++;
+            if (last) saw_final = 1;
+        }
+    } else {
+        /* --- v5 single-AEAD payload: hold back the trailing 16-byte tag --- */
+        in_buffer = malloc(BUFFER_SIZE);
+        out_buffer = malloc(BUFFER_SIZE + AES_BLOCK_SIZE);
+        work = malloc(BUFFER_SIZE + AES_GCM_TAG_SIZE);
+        if (!in_buffer || !out_buffer || !work) {
+            fprintf(stderr, "Error: Failed to allocate memory\n");
+            ret = CRYPTO_ERR_MEMORY;
+            goto cleanup;
         }
 
-        /* Combine carried-over bytes with the new read, then process all but
-         * the trailing 16 (which may turn out to be the tag). */
-        memcpy(work, hold, holdn);
-        memcpy(work + holdn, in_buffer, bytes_read);
-        size_t total = holdn + bytes_read;
-
-        if (total <= AES_GCM_TAG_SIZE) {
-            memcpy(hold, work, total);
-            holdn = total;
-            continue;
+        ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) {
+            fprintf(stderr, "Error: Failed to create cipher context\n");
+            goto cleanup;
         }
-
-        size_t process = total - AES_GCM_TAG_SIZE;
-        memcpy(hold, work + process, AES_GCM_TAG_SIZE);
-        holdn = AES_GCM_TAG_SIZE;
-
-        if (EVP_DecryptUpdate(ctx, out_buffer, &len, work, (int)process) != 1) {
-            fprintf(stderr, "Error: AES-GCM decryption failed\n");
+        int len;
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
+            EVP_DecryptInit_ex(ctx, NULL, NULL, cek, nonce) != 1 ||
+            EVP_DecryptUpdate(ctx, NULL, &len, header, (int)header_len) != 1) {
+            fprintf(stderr, "Error: Failed to initialize decryption\n");
             crypto_handle_errors();
+            goto cleanup;
+        }
+        while (1) {
+            size_t bytes_read = fread(in_buffer, 1, BUFFER_SIZE, in_file);
+            if (bytes_read == 0) {
+                if (ferror(in_file)) {
+                    fprintf(stderr, "Error: Failed to read ciphertext\n");
+                    ret = CRYPTO_ERR_FILE_IO;
+                    goto cleanup;
+                }
+                break;
+            }
+            memcpy(work, hold, holdn);
+            memcpy(work + holdn, in_buffer, bytes_read);
+            size_t total = holdn + bytes_read;
+            if (total <= AES_GCM_TAG_SIZE) { memcpy(hold, work, total); holdn = total; continue; }
+            size_t process = total - AES_GCM_TAG_SIZE;
+            memcpy(hold, work + process, AES_GCM_TAG_SIZE);
+            holdn = AES_GCM_TAG_SIZE;
+            if (EVP_DecryptUpdate(ctx, out_buffer, &len, work, (int)process) != 1) {
+                fprintf(stderr, "Error: AES-GCM decryption failed\n");
+                crypto_handle_errors();
+                goto cleanup;
+            }
+            if (len > 0) {
+                crypto_error_t wr = dec_sink_write(&sink, out_buffer, (size_t)len);
+                if (wr != CRYPTO_SUCCESS) { ret = wr; goto cleanup; }
+            }
+        }
+        if (holdn != AES_GCM_TAG_SIZE) {
+            fprintf(stderr, "Error: Truncated or invalid encrypted file\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        memcpy(tag, hold, AES_GCM_TAG_SIZE);
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AES_GCM_TAG_SIZE, tag) != 1 ||
+            EVP_DecryptFinal_ex(ctx, out_buffer, &len) != 1) {
+            fprintf(stderr, "Error: Authentication failed - file corrupt or wrong key\n");
+            ret = CRYPTO_ERR_INTEGRITY;
             goto cleanup;
         }
         if (len > 0) {
             crypto_error_t wr = dec_sink_write(&sink, out_buffer, (size_t)len);
-            if (wr != CRYPTO_SUCCESS) {
-                ret = wr;
-                goto cleanup;
-            }
-        }
-    }
-
-    if (holdn != AES_GCM_TAG_SIZE) {
-        fprintf(stderr, "Error: Truncated or invalid encrypted file\n");
-        ret = CRYPTO_ERR_INVALID_INPUT;
-        goto cleanup;
-    }
-    memcpy(tag, hold, AES_GCM_TAG_SIZE);
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AES_GCM_TAG_SIZE, tag) != 1 ||
-        EVP_DecryptFinal_ex(ctx, out_buffer, &len) != 1) {
-        fprintf(stderr, "Error: Authentication failed - file corrupt or wrong key\n");
-        ret = CRYPTO_ERR_INTEGRITY;
-        goto cleanup;
-    }
-    if (len > 0) {
-        crypto_error_t wr = dec_sink_write(&sink, out_buffer, (size_t)len);
-        if (wr != CRYPTO_SUCCESS) {
-            ret = wr;
-            goto cleanup;
+            if (wr != CRYPTO_SUCCESS) { ret = wr; goto cleanup; }
         }
     }
 
@@ -1412,7 +1475,7 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    /* The tag has now verified: it is safe to release any deferred (pipe) output. */
+    /* Release any deferred (v5 pipe) output now that authentication passed. */
     ret = dec_sink_commit(&sink);
     if (ret != CRYPTO_SUCCESS) goto cleanup;
 
@@ -1429,6 +1492,8 @@ cleanup:
     free(in_buffer);
     free(out_buffer);
     free(work);
+    free(cbuf);
+    if (pbuf) { OPENSSL_cleanse(pbuf, QSAFE_FRAME_SIZE); free(pbuf); }
     free(header);
     OPENSSL_cleanse(cek, sizeof(cek));
 
