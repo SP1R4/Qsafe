@@ -48,7 +48,7 @@ files with a 4.x build first).
 - Switched to ML-KEM-1024; scrypt-wrapped secret keys; streaming decryption;
   CI and expanded tests.
 
-[Unreleased]: https://github.com/OWNER/qsafe/compare/v5.0.0...HEAD
-[5.0.0]: https://github.com/OWNER/qsafe/releases/tag/v5.0.0
-[4.0.0]: https://github.com/OWNER/qsafe/releases/tag/v4.0.0
-[3.0.0]: https://github.com/OWNER/qsafe/releases/tag/v3.0.0
+[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v5.0.0
+[4.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v4.0.0
+[3.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v3.0.0

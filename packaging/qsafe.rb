@@ -1,19 +1,19 @@
 # Homebrew formula for Qsafe.
 #
 # This is a template for a Homebrew tap. To publish:
-#   1. Create a tap repo, e.g. github.com/<you>/homebrew-qsafe
+#   1. Create a tap repo, e.g. github.com/SP1R4/homebrew-qsafe
 #   2. Tag a release (git tag v5.0.0 && git push --tags); the release workflow
 #      attaches qsafe-vX-*.tar.gz artifacts.
 #   3. Update `url` to the source tarball for the tag and fill in `sha256`
 #      (`brew fetch` or `shasum -a 256` on the downloaded tarball).
 #   4. Drop this file in the tap's Formula/ directory.
 #
-# Users then: brew install <you>/qsafe/qsafe
+# Users then: brew install SP1R4/qsafe/qsafe
 class Qsafe < Formula
   desc "Hybrid post-quantum file encryption and signing (X25519 + ML-KEM-1024)"
-  homepage "https://github.com/OWNER/qsafe"
-  url "https://github.com/OWNER/qsafe/archive/refs/tags/v5.0.0.tar.gz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
+  homepage "https://github.com/SP1R4/Qsafe"
+  url "https://github.com/SP1R4/Qsafe/archive/refs/tags/v5.0.0.tar.gz"
+  sha256 "ebc8bd01f90c4fc28c622df04dc3dcf290b5e884810b88d408e8093eb20bd83b"
   license "MIT"
 
   depends_on "openssl@3"
