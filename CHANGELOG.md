@@ -6,6 +6,12 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Windows support** (MSYS2 / MinGW-w64): a platform shim (`include/platform.h`)
+  for binary stdio, no-echo console input, temp files, `mkdir`, `realpath`,
+  `chmod`, and `utime`; Makefile auto-detects MinGW and builds `qsafe.exe`; a
+  Windows CI job builds and tests on `windows-latest`.
+
 ## [6.0.0] - 2026-06-25
 
 Default encrypted-file format is now the framed **QSAFE006**. Not a breaking

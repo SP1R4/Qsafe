@@ -41,7 +41,7 @@ Qsafe follows a true public-key workflow: you generate a keypair **once** with `
 - **Flexible passphrase entry** — interactive no-echo prompt, `$QSAFE_PASSPHRASE`, or `--passphrase-file` (never required on the command line)
 - **Batch processing** — recursively encrypt or decrypt entire directory trees
 - **Tamper detection** — any modification to the ciphertext, header, or recipient records is rejected
-- **Cross-platform** — builds on Linux and macOS (Homebrew)
+- **Cross-platform** — builds on Linux, macOS (Homebrew), and Windows (MSYS2/MinGW-w64)
 
 ---
 
@@ -222,6 +222,26 @@ The `qsafe` binary is placed in the project root. To install it system-wide:
 sudo make install                # binary + man page (override with PREFIX=)
 sudo make install-completions    # optional: bash + zsh completions
 ```
+
+### Manual — Windows (MSYS2 / MinGW-w64)
+
+From an **MSYS2 MINGW64** shell:
+
+```bash
+pacman -S --needed git make mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl \
+                   mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+
+# Build and install liboqs into the MinGW prefix
+git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+cmake -S liboqs -B liboqs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DOQS_BUILD_ONLY_LIB=ON -DCMAKE_INSTALL_PREFIX=/mingw64
+cmake --build liboqs/build && cmake --install liboqs/build
+
+# Build Qsafe -> qsafe.exe
+make
+```
+
+The Makefile auto-detects MSYS2/MinGW and produces `qsafe.exe`.
 
 ### Verifying releases
 

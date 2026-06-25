@@ -4,7 +4,8 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BINARY="$PROJECT_DIR/qsafe"
-TMPDIR=$(mktemp -d /tmp/qsafe_test_XXXXXX)
+[ -x "$BINARY" ] || BINARY="$PROJECT_DIR/qsafe.exe"   # Windows/MSYS2
+TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/qsafe_test_XXXXXX")
 export QSAFE_PASSPHRASE="test-passphrase-e2e"
 KEYFILE="$TMPDIR/key.bin"
 TESTS_RUN=0

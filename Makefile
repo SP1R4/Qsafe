@@ -10,6 +10,8 @@ UNAME_S := $(shell uname -s)
 # --- Dependency discovery -----------------------------------------------------
 # On macOS use Homebrew prefixes when available; otherwise fall back to
 # /usr/local. On Linux assume system include paths plus /usr/local/lib.
+EXEEXT =
+
 ifeq ($(UNAME_S),Darwin)
     BREW := $(shell command -v brew 2>/dev/null)
     ifneq ($(BREW),)
@@ -20,23 +22,40 @@ ifeq ($(UNAME_S),Darwin)
     LIBOQS_PREFIX  ?= /usr/local
     CPPFLAGS += -I$(OPENSSL_PREFIX)/include -I$(LIBOQS_PREFIX)/include
     LDFLAGS  += -L$(OPENSSL_PREFIX)/lib -L$(LIBOQS_PREFIX)/lib
+else ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+    # Windows via MSYS2/MinGW-w64. openssl + liboqs from the mingw prefix are on
+    # the default search path; set LIBOQS_PREFIX/OPENSSL_PREFIX to override.
+    EXEEXT = .exe
+    WINDOWS = 1
+    ifdef OPENSSL_PREFIX
+        CPPFLAGS += -I$(OPENSSL_PREFIX)/include
+        LDFLAGS  += -L$(OPENSSL_PREFIX)/lib
+    endif
+    ifdef LIBOQS_PREFIX
+        CPPFLAGS += -I$(LIBOQS_PREFIX)/include
+        LDFLAGS  += -L$(LIBOQS_PREFIX)/lib
+    endif
 else
     CPPFLAGS += -D_FORTIFY_SOURCE=2
     LDFLAGS  += -L/usr/local/lib
 endif
 
 LDLIBS += -loqs -lssl -lcrypto
+# OpenSSL on Windows pulls in these system libraries (needed for static links).
+ifdef WINDOWS
+    LDLIBS += -lws2_32 -lcrypt32 -lbcrypt
+endif
 
 SRC_DIR = src
 TEST_DIR = tests
 
 SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c
 OBJECTS = $(SOURCES:.c=.o)
-EXECUTABLE = qsafe
+EXECUTABLE = qsafe$(EXEEXT)
 
 TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
-TEST_EXECUTABLE = $(TEST_DIR)/test_crypto
+TEST_EXECUTABLE = $(TEST_DIR)/test_crypto$(EXEEXT)
 
 all: $(EXECUTABLE)
 
@@ -51,7 +70,7 @@ $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
 test: $(EXECUTABLE) $(TEST_EXECUTABLE)
-	$(TEST_DIR)/test_crypto
+	./$(TEST_EXECUTABLE)
 	$(TEST_DIR)/test.sh
 
 $(TEST_EXECUTABLE): $(TEST_OBJECTS)
