@@ -11,6 +11,9 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for binary stdio, no-echo console input, temp files, `mkdir`, `realpath`,
   `chmod`, and `utime`; Makefile auto-detects MinGW and builds `qsafe.exe`; a
   Windows CI job builds and tests on `windows-latest`.
+- CodeQL static analysis workflow (results in the repo Security tab).
+- Continuous-fuzzing workflow: daily + on parser changes, with a corpus
+  persisted across runs and crash inputs uploaded as artifacts.
 
 ## [6.0.0] - 2026-06-25
 
