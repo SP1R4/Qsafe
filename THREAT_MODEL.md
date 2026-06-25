@@ -1,0 +1,181 @@
+# Qsafe Threat Model
+
+This document states, as plainly as possible, **what Qsafe protects, what it
+does not, and the assumptions it relies on.** Read it before trusting Qsafe with
+anything that matters. Honesty about limitations is part of the security
+posture — a guarantee that isn't written down here is a guarantee Qsafe does not
+make.
+
+Applies to the **QSAFE005** file format (Qsafe 5.x).
+
+---
+
+## 1. What Qsafe is
+
+A command-line tool that encrypts a file (or directory) so only the holder(s) of
+the corresponding secret key can read it, and that can produce detached
+signatures. Key establishment is **hybrid**:
+
+- **X25519** (classical Diffie–Hellman, RFC 7748), and
+- **ML-KEM-1024** (post-quantum KEM, NIST FIPS 203)
+
+Their two shared secrets are concatenated and run through **HKDF-SHA256** to
+derive a key-encryption key. A random per-file **content key (CEK)** seals the
+payload with **AES-256-GCM**. The CEK is wrapped once per recipient. Signatures
+use **ML-DSA-87** (NIST FIPS 204). Secret keys are wrapped at rest with a key
+derived from a passphrase via **scrypt**.
+
+---
+
+## 2. Assets
+
+1. **Plaintext confidentiality** — the contents of encrypted files.
+2. **Plaintext/ciphertext integrity** — detection of any modification.
+3. **Secret keys** — the long-term KEM/signing secret keys on disk.
+4. **Sender authenticity** — for signed files, that a file came from a given key.
+
+---
+
+## 3. Adversaries considered
+
+| Adversary | Capability | Defended? |
+|:--|:--|:--|
+| Passive eavesdropper | Reads ciphertext in transit/at rest | ✅ confidentiality |
+| Active network attacker | Modifies/replaces ciphertext bytes | ✅ detected (AEAD) |
+| **Future quantum attacker** | Recorded ciphertext today, runs Shor/Grover later | ✅ ML-KEM layer |
+| Cryptanalytic break of *one* primitive | Breaks X25519 **or** ML-KEM (not both) | ✅ hybrid design |
+| Thief of a `.qsafe` file | Has ciphertext only | ✅ needs a secret key |
+| Thief of a secret-key file | Has the wrapped key, not the passphrase | ⚠️ only as strong as scrypt + passphrase |
+| Malicious recipient (multi-recipient) | Is one of several recipients | ⚠️ can read the file (by design) and learns the recipient count |
+| Attacker on your machine while you decrypt | Reads memory/keystrokes/plaintext | ❌ out of scope |
+
+---
+
+## 4. Security goals and how they are met
+
+- **Confidentiality (classical + post-quantum):** the payload key is derived
+  from *both* an X25519 DH and an ML-KEM encapsulation. An attacker must break
+  **both** to recover plaintext. "Harvest now, decrypt later" is mitigated by
+  the ML-KEM layer.
+- **Integrity + authentication of the container:** AES-256-GCM authenticates the
+  payload, and the **entire header** — magic, recipient count, payload nonce,
+  and every recipient record — is fed as Additional Authenticated Data (AAD).
+  Reordering, swapping, truncating, or editing any of it causes decryption to
+  fail.
+- **Per-recipient wrap integrity:** each recipient record wraps the CEK under
+  AES-256-GCM; a tampered ephemeral key or KEM ciphertext yields a wrong
+  key-wrapping key and the wrap tag fails to verify.
+- **Sender authenticity (signatures):** ML-DSA-87 over the SHA-256 digest of the
+  file. `verify-sig` returns success only for a valid signature by the named
+  public key.
+- **Key-at-rest protection:** secret keys are sealed with AES-256-GCM under a
+  scrypt-derived key (default N=2¹⁵, tunable via `--scrypt-cost`); the scrypt
+  parameters are authenticated, so they cannot be silently downgraded.
+
+### Cryptographic details worth auditing
+
+- **Hybrid combiner:** `HKDF-SHA256(ikm = X25519_dh ‖ ML-KEM_ss, info =
+  "qsafe-v5-hybrid-kek")`. Concatenation-then-KDF is a standard hybrid
+  construction; the security relies on HKDF acting as a good extractor.
+- **Nonces:** the payload CEK is random per file and its 96-bit GCM nonce is
+  random; each per-recipient wrap uses an independent random 96-bit nonce. With
+  random keys per file, nonce-reuse risk is negligible.
+- **Ephemerality:** each recipient record uses a fresh ephemeral X25519 key.
+  Note this does **not** provide forward secrecy against compromise of the
+  *long-term recipient secret key* (see §6).
+
+---
+
+## 5. What Qsafe deliberately does NOT hide (metadata leakage)
+
+An observer of a `.qsafe` file learns:
+
+- **Approximate plaintext size** — ciphertext length ≈ plaintext + a fixed
+  overhead. Qsafe does **not** pad.
+- **The number of recipients** — the header stores the recipient count, and each
+  recipient adds a fixed-size record. Recipient *identities* are not stored, but
+  the count and the file's growth with more recipients are visible.
+- **That the file is a Qsafe file** — the `QSAFE005` magic is in cleartext.
+- **For directories:** the structure and per-file sizes (each file is encrypted
+  individually).
+
+The original filename, permission bits, and mtime ARE encrypted (inside the
+authenticated payload) and are not leaked.
+
+---
+
+## 6. Non-goals and known limitations
+
+These are real and intentional gaps. If your threat model needs any of them,
+Qsafe is the wrong tool.
+
+1. **No forward secrecy for long-term keys.** Decryption requires the long-term
+   recipient secret key. If that key (and passphrase) are later compromised,
+   **all** past files encrypted to it can be decrypted. The ephemeral X25519 key
+   protects the *sender's* side only.
+2. **Release of unverified plaintext (RUP).** Decryption is streaming and the
+   GCM tag is only verified at end-of-stream. Qsafe handles the release of
+   plaintext as follows:
+   - **stdout / pipes:** plaintext is **buffered in memory and not released to
+     the consumer until the tag verifies** (verify-before-release). On
+     authentication failure nothing is emitted. This trades constant-memory
+     streaming for safety on the pipe path: the entire payload is held in RAM,
+     so piping a very large ciphertext uses memory proportional to its size
+     (decrypt to a file instead for large inputs).
+   - **file output:** still streams to disk and is `remove()`d on authentication
+     failure, so no unverified plaintext persists after Qsafe exits. A narrow
+     window exists where the partial file is on disk before the failure is
+     detected; a concurrent reader could observe it.
+   Always check Qsafe's exit code before treating decrypted output as authentic.
+3. **No protection of a compromised host.** Qsafe assumes the machine is trusted
+   at the moment of use. Malware, keyloggers, swap/coredumps, or another local
+   user can defeat it. Sensitive buffers are wiped with `OPENSSL_cleanse`, but
+   this is best-effort, not a guarantee against a privileged adversary.
+4. **Passphrase strength is your responsibility.** scrypt slows guessing, but a
+   weak passphrase on a stolen key file is the weakest link.
+5. **No deniability or anti-traffic-analysis.** No plausible-deniability mode, no
+   padding, no hidden volumes, no metadata anonymity.
+6. **No replay/freshness context.** Qsafe authenticates that a file is intact and
+   addressed to you; it does not bind a file to a time, sequence, or context.
+   Re-sending an old valid ciphertext is not detected by Qsafe itself.
+7. **No protection against a malicious recipient** in multi-recipient mode — any
+   listed recipient can read the file and could redistribute the plaintext.
+8. **Signatures sign a SHA-256 digest**, not the raw message. SHA-256 collision
+   resistance is assumed (this is standard hash-then-sign).
+
+---
+
+## 7. Trust assumptions
+
+Qsafe's guarantees hold only if:
+
+- **The primitives are secure** as specified: X25519, ML-KEM-1024, ML-DSA-87,
+  AES-256-GCM, HKDF-SHA256, scrypt, SHA-256. Weaknesses in these are upstream
+  (OpenSSL / liboqs / NIST), not Qsafe.
+- **The CSPRNG is sound.** Qsafe relies on OpenSSL `RAND_bytes` (and liboqs'
+  RNG) for keys, the CEK, and all nonces. A broken/weakly-seeded RNG breaks
+  confidentiality.
+- **liboqs is built correctly.** The post-quantum implementations come from
+  liboqs; use a release build and track its advisories.
+- **The host is trusted at time of use** (see §6.3).
+
+---
+
+## 8. Assurance measures in this repository
+
+- **Known-answer tests** for SHA-256, HKDF-SHA256, and scrypt with values
+  computed independently of Qsafe's code (`tests/test_crypto_utils.c`).
+- **AddressSanitizer + UndefinedBehaviorSanitizer + Valgrind** over the test
+  suite in CI (`.github/workflows/hardening.yml`).
+- **Fuzzing harness** over the untrusted-input parsers
+  (`tests/fuzz_decrypt.c`, `make fuzz`) with a CI smoke run.
+- **End-to-end tests** for tamper rejection, wrong-key rejection,
+  multi-recipient isolation, and signature forgery rejection (`tests/test.sh`).
+
+These raise confidence; they are **not** a substitute for an independent audit
+(see [SECURITY.md](SECURITY.md)).
+
+---
+
+*If you find a gap between what this document claims and what the code does,
+that is a security bug — please report it (see SECURITY.md).*

@@ -1,0 +1,75 @@
+name: Hardening
+
+# Memory-safety and undefined-behavior checks beyond the basic build/test in
+# ci.yml: AddressSanitizer + UndefinedBehaviorSanitizer, Valgrind, and a short
+# fuzzing smoke run over the untrusted-input parsers.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hardening:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev cmake ninja-build valgrind clang
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: liboqs-install
+          key: liboqs-0.12.0-${{ runner.os }}
+
+      - name: Build liboqs
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Install liboqs
+        run: |
+          sudo cp -r liboqs-install/include/* /usr/local/include/
+          sudo cp -r liboqs-install/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      # --- AddressSanitizer + UndefinedBehaviorSanitizer ---
+      - name: Build & test under ASan/UBSan
+        env:
+          # Library one-time globals (OpenSSL/liboqs) are not leaks we own.
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          make clean
+          make test \
+            EXTRA_CFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1" \
+            EXTRA_LDFLAGS="-fsanitize=address,undefined"
+
+      # --- Valgrind (independent memory checker) ---
+      - name: Run unit tests under Valgrind
+        run: |
+          make clean && make
+          valgrind --error-exitcode=99 --leak-check=full --errors-for-leak-kinds=definite \
+            tests/test_crypto
+
+      # --- Fuzzing smoke run (libFuzzer) ---
+      - name: Fuzz smoke run
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          make clean
+          make fuzz FUZZ_CC=clang
+          mkdir -p corpus
+          # 90 seconds is a smoke test, not a real campaign; long runs belong in
+          # a scheduled job or OSS-Fuzz.
+          tests/fuzz_decrypt -max_len=8192 -max_total_time=90 -print_final_stats=1 corpus
