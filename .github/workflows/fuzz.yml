@@ -1,0 +1,97 @@
+name: Fuzz
+
+# Continuous fuzzing of the untrusted-input parsers (decrypt / inspect /
+# dearmor). Runs daily and on changes to the parsing code or this workflow,
+# persisting a corpus across runs via the cache so coverage accumulates. A
+# crash makes the job fail and uploads the reproducing input as an artifact.
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # daily 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Fuzz duration in seconds"
+        default: "600"
+  pull_request:
+    paths:
+      - "src/**"
+      - "include/**"
+      - "tests/fuzz_decrypt.c"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/google-chrome.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev cmake ninja-build clang
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: liboqs-install
+          key: liboqs-0.12.0-${{ runner.os }}
+
+      - name: Build liboqs
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Install liboqs
+        run: |
+          sudo cp -r liboqs-install/include/* /usr/local/include/
+          sudo cp -r liboqs-install/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Build fuzz target
+        run: make fuzz FUZZ_CC=clang
+
+      # Persist the corpus across runs: the unique key always misses, but the
+      # restore-key prefix pulls the most recent corpus, and the new corpus is
+      # saved at job end.
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: corpus
+          key: qsafe-fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            qsafe-fuzz-corpus-
+
+      - name: Fuzz
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          DURATION: ${{ github.event.inputs.duration || '300' }}
+        run: |
+          mkdir -p corpus
+          tests/fuzz_decrypt -max_len=8192 -max_total_time="$DURATION" \
+            -print_final_stats=1 corpus
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+            leak-*
+          if-no-files-found: ignore

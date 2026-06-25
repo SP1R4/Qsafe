@@ -6,6 +6,11 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- CodeQL static analysis workflow (results in the repo Security tab).
+- Continuous-fuzzing workflow: daily + on parser changes, with a corpus
+  persisted across runs and crash inputs uploaded as artifacts.
+
 ## [6.0.0] - 2026-06-25
 
 Default encrypted-file format is now the framed **QSAFE006**. Not a breaking
