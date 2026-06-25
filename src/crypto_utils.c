@@ -9,7 +9,6 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <utime.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -17,6 +16,7 @@
 #include <openssl/crypto.h>
 #include <openssl/core_names.h>
 #include <oqs/oqs.h>
+#include "platform.h"
 #include "crypto_utils.h"
 
 /* Domain-separation label mixed into the HKDF expansion so the AES key derived
@@ -289,7 +289,7 @@ crypto_error_t crypto_save_secret_key(const char *filename, const unsigned char 
 
     /* Secret key material: restrict permissions to the owner. */
     fflush(file);
-    chmod(filename, 0600);
+    qsafe_chmod_private(filename);
 
     ret = CRYPTO_SUCCESS;
 
@@ -1500,11 +1500,7 @@ cleanup:
     if (ret == CRYPTO_SUCCESS) {
         /* Restore stored permissions and modification time on success. */
         if (sink.out_created && sink.has_meta && !sink.skipped) {
-            chmod(sink.out_path, (mode_t)(sink.mode & 0777));
-            struct utimbuf times;
-            times.actime = (time_t)sink.mtime;
-            times.modtime = (time_t)sink.mtime;
-            utime(sink.out_path, &times);
+            qsafe_restore_meta(sink.out_path, sink.mode, sink.mtime);
         }
     } else if (sink.out_created) {
         remove(sink.out_path); /* never leave behind unauthenticated plaintext */
@@ -1514,7 +1510,7 @@ cleanup:
 
 /* Resolve a path to its canonical form. Returns 1 on success. */
 static int crypto_realpath(const char *path, char *resolved) {
-    return realpath(path, resolved) != NULL;
+    return qsafe_realpath(path, resolved);
 }
 
 crypto_error_t crypto_process_directory(const char *dir_path, const char *output_dir, const char *operation,
@@ -1529,7 +1525,7 @@ crypto_error_t crypto_process_directory(const char *dir_path, const char *output
 
     struct stat st;
     if (stat(output_dir, &st) != 0) {
-        if (mkdir(output_dir, 0755) != 0) {
+        if (qsafe_mkdir(output_dir) != 0) {
             perror("Error creating output directory");
             closedir(dir);
             return CRYPTO_ERR_FILE_IO;

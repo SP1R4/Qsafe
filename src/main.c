@@ -5,12 +5,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <termios.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+  #include <unistd.h>
+  #include <termios.h>
+#endif
 #include <oqs/oqs.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
+#include "platform.h"
 #include "crypto_utils.h"
 
 #define PROGRAM_NAME "qsafe"
@@ -70,6 +73,34 @@ static void print_usage(void) {
     printf("  %s encrypt ./photos                 # -> ./photos_qsafe/\n", PROGRAM_NAME);
 }
 
+/* Strips a trailing newline (and CR, since stdin may be binary on Windows). */
+static void strip_eol(char *buf) {
+    size_t l = strlen(buf);
+    while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = '\0';
+}
+
+#ifdef _WIN32
+/* Reads a line without echoing, by disabling console echo when stdin is a
+ * console (a no-op for piped input, which never echoes). Returns 1 on success. */
+static int read_hidden(const char *prompt, char *buf, size_t bufsz) {
+    fprintf(stderr, "%s", prompt);
+    fflush(stderr);
+
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    int have_mode = GetConsoleMode(h, &mode);
+    if (have_mode) SetConsoleMode(h, mode & ~(DWORD)ENABLE_ECHO_INPUT);
+
+    char *r = fgets(buf, (int)bufsz, stdin);
+
+    if (have_mode) SetConsoleMode(h, mode);
+    fprintf(stderr, "\n");
+
+    if (!r) return 0;
+    strip_eol(buf);
+    return 1;
+}
+#else
 /* Reads a line without echoing it, preferring the controlling terminal so it
  * works even when stdin is a pipe. Returns 1 on success. */
 static int read_hidden(const char *prompt, char *buf, size_t bufsz) {
@@ -98,10 +129,10 @@ static int read_hidden(const char *prompt, char *buf, size_t bufsz) {
     if (use_tty) fclose(tty);
 
     if (!r) return 0;
-    size_t l = strlen(buf);
-    if (l > 0 && buf[l - 1] == '\n') buf[l - 1] = '\0';
+    strip_eol(buf);
     return 1;
 }
+#endif
 
 /* Resolves the passphrase into buf and points config->passphrase at it (or, for
  * --passphrase, at argv directly). confirm=1 prompts twice and compares. */
@@ -211,6 +242,14 @@ static void default_output(const char *input, const char *operation, int is_dir,
 /* Creates a unique temporary file path used to stage the binary container
  * while armoring/dearmoring. Returns 1 on success. */
 static int make_temp_path(char *buf, size_t n) {
+#ifdef _WIN32
+    char dir[MAX_PATH];
+    if (GetTempPathA((DWORD)sizeof(dir), dir) == 0) return 0;
+    char path[MAX_PATH];
+    if (GetTempFileNameA(dir, "qsf", 0, path) == 0) return 0; /* creates the file */
+    if ((size_t)snprintf(buf, n, "%s", path) >= n) return 0;
+    return 1;
+#else
     const char *dir = getenv("TMPDIR");
     if (!dir || !*dir) dir = "/tmp";
     if ((size_t)snprintf(buf, n, "%s/qsafe_armor_XXXXXX", dir) >= n) return 0;
@@ -218,9 +257,14 @@ static int make_temp_path(char *buf, size_t n) {
     if (fd < 0) return 0;
     close(fd);
     return 1;
+#endif
 }
 
 int main(int argc, char *argv[]) {
+    /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
+     * by CRLF translation. No-op on POSIX. */
+    qsafe_set_binary_stdio();
+
     if (argc < 2) {
         print_usage();
         return 1;

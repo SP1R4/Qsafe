@@ -1,0 +1,7 @@
+# Test fixtures are exact bytes (ciphertext, keys, expected plaintext) — never
+# apply end-of-line conversion, or they break on Windows checkouts where
+# core.autocrlf is enabled.
+tests/fixtures/** binary
+
+# Shell scripts must stay LF so they run under MSYS2 bash on Windows.
+*.sh text eol=lf

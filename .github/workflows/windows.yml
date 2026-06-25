@@ -1,0 +1,59 @@
+name: Windows
+
+# Builds and tests Qsafe on Windows via MSYS2 / MinGW-w64. liboqs is built from
+# source (pinned); OpenSSL comes from the MSYS2 package repos.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW-w64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            diffutils
+            coreutils
+            grep
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Build & install liboqs
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX=/mingw64
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Build
+        run: make
+
+      - name: Smoke test (version + keygen/encrypt/decrypt round-trip)
+        run: |
+          ./qsafe --version
+          export QSAFE_PASSPHRASE=ci-pass
+          printf 'windows round-trip\n' > msg.txt
+          ./qsafe keygen --key-file k.bin
+          ./qsafe encrypt --key-file k.bin msg.txt msg.qsafe
+          ./qsafe decrypt --key-file k.bin msg.qsafe out.txt
+          cmp msg.txt out.txt && echo "round-trip OK"
+
+      - name: Test suite
+        run: make test

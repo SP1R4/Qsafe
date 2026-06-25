@@ -115,7 +115,7 @@ static void test_derive_key_from_passphrase(void) {
 static void test_save_load_secret_key(void) {
     printf("\n[test_save_load_secret_key]\n");
 
-    const char *keyfile = "/tmp/test_qsafe_key.bin";
+    const char *keyfile = "test_qsafe_key.bin";
     unsigned char original[64];
     RAND_bytes(original, sizeof(original));
 
@@ -139,7 +139,7 @@ static void test_save_load_secret_key(void) {
     }
 
     /* Saving the same key twice must produce different files (random salt + nonce). */
-    const char *keyfile2 = "/tmp/test_qsafe_key2.bin";
+    const char *keyfile2 = "test_qsafe_key2.bin";
     crypto_config_t config2 = config;
     config2.secret_key_file = keyfile2;
     ret = crypto_save_secret_key(keyfile2, original, sizeof(original), &config2);
@@ -166,7 +166,7 @@ static void test_save_load_secret_key(void) {
 static void test_save_load_public_key(void) {
     printf("\n[test_save_load_public_key]\n");
 
-    const char *pubfile = "/tmp/test_qsafe_pub.bin";
+    const char *pubfile = "test_qsafe_pub.bin";
     unsigned char original[1568];
     RAND_bytes(original, sizeof(original));
 
@@ -197,9 +197,9 @@ static void test_save_load_public_key(void) {
 /* Encrypts then decrypts a buffer of the given size and checks the round-trip. */
 static void roundtrip_case(OQS_KEM *kem, const unsigned char *pub, const unsigned char *sec,
                            size_t size, const char *label) {
-    const char *plain = "/tmp/test_qsafe_rt_plain.bin";
-    const char *enc = "/tmp/test_qsafe_rt_enc.bin";
-    const char *dec = "/tmp/test_qsafe_rt_dec.bin";
+    const char *plain = "test_qsafe_rt_plain.bin";
+    const char *enc = "test_qsafe_rt_enc.bin";
+    const char *dec = "test_qsafe_rt_dec.bin";
 
     unsigned char *data = malloc(size + 1);
     if (!data) { ASSERT(0, label); return; }
@@ -249,9 +249,9 @@ static void test_encrypt_decrypt_file(void) {
     roundtrip_case(kem, pub, sec, 100000, "round-trip: multi-chunk file (streaming)");
 
     /* Tamper detection. */
-    const char *plain = "/tmp/test_qsafe_plain.txt";
-    const char *enc = "/tmp/test_qsafe_enc.bin";
-    const char *dec = "/tmp/test_qsafe_dec.txt";
+    const char *plain = "test_qsafe_plain.txt";
+    const char *enc = "test_qsafe_enc.bin";
+    const char *dec = "test_qsafe_dec.txt";
     const char *data = "Hello, Qsafe 5.0! Hybrid post-quantum integrity check.\n";
     ASSERT(write_file(plain, (const unsigned char *)data, strlen(data)), "create tamper-test plaintext");
 
