@@ -58,7 +58,7 @@ jobs:
       # --- Valgrind (independent memory checker) ---
       - name: Run unit tests under Valgrind
         run: |
-          make clean && make
+          make clean && make tests/test_crypto
           valgrind --error-exitcode=99 --leak-check=full --errors-for-leak-kinds=definite \
             tests/test_crypto
 
