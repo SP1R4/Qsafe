@@ -213,7 +213,7 @@ check_ok "inspect public key succeeds" \
     "$BINARY" inspect "$KEYFILE.pub"
 "$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -q "hybrid public key" \
     && pass "inspect identifies public key" || fail "inspect identifies public key"
-"$BINARY" inspect "$TMPDIR/test_input.enc" 2>/dev/null | grep -q "QSAFE005" \
+"$BINARY" inspect "$TMPDIR/test_input.enc" 2>/dev/null | grep -q "QSAFE006" \
     && pass "inspect identifies encrypted file" || fail "inspect identifies encrypted file"
 FP1=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
 FP2=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
@@ -332,6 +332,40 @@ SZ=$(wc -c < "$TMPDIR/pipe_tamper.out" | tr -d ' ')
 "$BINARY" --key-file "$KEYFILE" decrypt - < "$TMPDIR/test_input.enc" > "$TMPDIR/pipe_ok.out" 2>/dev/null
 check_ok "valid pipe decrypt still matches original" \
     diff -q "$TMPDIR/test_input.txt" "$TMPDIR/pipe_ok.out"
+
+# --- Test 17: framed format (QSAFE006) ---
+echo ""
+echo "[test: framed format]"
+# Multi-frame round-trip (well over one 64 KiB frame).
+dd if=/dev/urandom of="$TMPDIR/multi.in" bs=1024 count=300 >/dev/null 2>&1
+"$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/multi.in" "$TMPDIR/multi.q" >/dev/null 2>&1
+"$BINARY" --force --key-file "$KEYFILE" decrypt "$TMPDIR/multi.q" "$TMPDIR/multi.out" >/dev/null 2>&1
+check_ok "multi-frame round-trip matches" cmp -s "$TMPDIR/multi.in" "$TMPDIR/multi.out"
+"$BINARY" inspect "$TMPDIR/multi.q" 2>/dev/null | grep -q "framed" \
+    && pass "inspect reports framed AEAD" || fail "inspect reports framed AEAD"
+# Edge: META(272) + file == 65536 forces a full frame plus an empty final frame.
+dd if=/dev/urandom of="$TMPDIR/exact.in" bs=65264 count=1 >/dev/null 2>&1
+"$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/exact.in" "$TMPDIR/exact.q" >/dev/null 2>&1
+"$BINARY" --force --key-file "$KEYFILE" decrypt "$TMPDIR/exact.q" "$TMPDIR/exact.out" >/dev/null 2>&1
+check_ok "frame-multiple round-trip matches" cmp -s "$TMPDIR/exact.in" "$TMPDIR/exact.out"
+# Truncation (dropping the tail of the final frame) must be detected.
+SZ=$(wc -c < "$TMPDIR/multi.q"); head -c $((SZ-40)) "$TMPDIR/multi.q" > "$TMPDIR/multi.trunc.q"
+check_fail "truncated framed file is rejected" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/multi.trunc.q"
+# Tampering a frame byte must be detected.
+cp "$TMPDIR/multi.q" "$TMPDIR/multi.bad.q"
+printf 'X' | dd of="$TMPDIR/multi.bad.q" bs=1 seek=2000 count=1 conv=notrunc 2>/dev/null
+check_fail "tampered framed file is rejected" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/multi.bad.q"
+
+# --- Test 18: v5 backward-compatible decrypt (dual-read) ---
+echo ""
+echo "[test: v5 interop]"
+FIX="$PROJECT_DIR/tests/fixtures"
+env QSAFE_PASSPHRASE="v5-fixture-pass" "$BINARY" --key-file "$FIX/v5_key" \
+    decrypt "$FIX/v5_msg.qsafe" "$TMPDIR/v5.out" >/dev/null 2>&1
+check_ok "decrypts a QSAFE005 file produced by v5.0.0" \
+    cmp -s "$FIX/v5_msg.expected" "$TMPDIR/v5.out"
 
 # --- Results ---
 echo ""

@@ -31,6 +31,20 @@
 #define VERSION_HEADER "QSAFE005"
 #define VERSION_HEADER_SIZE 8
 
+/* v6 (QSAFE006) is a framed-AEAD format: the payload is a sequence of
+ * independently authenticated frames, each verified before its plaintext is
+ * released, giving constant-memory streaming AND verify-before-release (no need
+ * to buffer the whole payload). encrypt always writes v6; decrypt reads both v5
+ * and v6. The v6 header drops the single payload nonce (frames use per-frame
+ * counter nonces):  magic(8) | recipient_count(1) | record[0..R-1].
+ *
+ * Each frame on the wire is: ciphertext(plaintext_len) | tag(16). Non-final
+ * frames carry exactly QSAFE_FRAME_SIZE plaintext; the single final frame
+ * carries 0..QSAFE_FRAME_SIZE-1 (so the final frame is always strictly shorter
+ * on the wire, which is how the reader detects it without a length prefix). */
+#define VERSION_HEADER_V6 "QSAFE006"
+#define QSAFE_FRAME_SIZE 65536
+
 /* X25519 raw key size and the random content-encryption key wrapped per
  * recipient. A v5 recipient record is, in order:
  *   ephemeral_x25519_pub(32) | kem_ciphertext | wrap_nonce(12) |

@@ -113,20 +113,25 @@ Qsafe is the wrong tool.
    recipient secret key. If that key (and passphrase) are later compromised,
    **all** past files encrypted to it can be decrypted. The ephemeral X25519 key
    protects the *sender's* side only.
-2. **Release of unverified plaintext (RUP).** Decryption is streaming and the
-   GCM tag is only verified at end-of-stream. Qsafe handles the release of
-   plaintext as follows:
-   - **stdout / pipes:** plaintext is **buffered in memory and not released to
-     the consumer until the tag verifies** (verify-before-release). On
-     authentication failure nothing is emitted. This trades constant-memory
-     streaming for safety on the pipe path: the entire payload is held in RAM,
-     so piping a very large ciphertext uses memory proportional to its size
-     (decrypt to a file instead for large inputs).
-   - **file output:** still streams to disk and is `remove()`d on authentication
-     failure, so no unverified plaintext persists after Qsafe exits. A narrow
-     window exists where the partial file is on disk before the failure is
-     detected; a concurrent reader could observe it.
-   Always check Qsafe's exit code before treating decrypted output as authentic.
+2. **Release of unverified plaintext (RUP).** The current format (QSAFE006) is
+   **framed**: the payload is a sequence of 64 KiB frames, each authenticated
+   independently, and **each frame's plaintext is released only after that
+   frame's tag verifies** — for both files and pipes, in constant memory. No
+   unauthenticated byte is ever released. The framing also makes truncation (a
+   missing final frame) and reordering detectable.
+   - **Caveat (prefix release):** for a multi-frame file, earlier frames are
+     released before a later corrupt/truncated frame is detected. Every released
+     byte was authenticated, but a mid-stream failure means a verified *prefix*
+     may already have reached the consumer. A single-frame (small) file is
+     all-or-nothing; a large file is prefix-or-error. This is the standard,
+     unavoidable semantics of streaming AEAD. **Check the exit code** before
+     treating output as complete.
+   - **file output** is additionally `remove()`d on failure, so no partial
+     plaintext file persists after Qsafe exits (a concurrent reader could still
+     observe it during the run).
+   - **Legacy QSAFE005** files (still decryptable) are not framed; for those the
+     pipe path buffers the whole payload in memory and releases nothing on
+     failure (all-or-nothing, at the cost of RAM).
 3. **No protection of a compromised host.** Qsafe assumes the machine is trusted
    at the moment of use. Malware, keyloggers, swap/coredumps, or another local
    user can defeat it. Sensitive buffers are wiped with `OPENSSL_cleanse`, but
