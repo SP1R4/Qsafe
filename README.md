@@ -167,6 +167,19 @@ Encrypted File --> Verify Header --> KEM Ciphertext -------------------+
 
 ## Installation
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install <you>/qsafe/qsafe   # from a tap; see packaging/qsafe.rb
+```
+
+### Docker
+
+```bash
+docker build -t qsafe .
+docker run --rm -e QSAFE_PASSPHRASE=secret -v "$PWD:/data" qsafe keygen --key-file /data/key.bin
+```
+
 ### Automated (macOS or Ubuntu/Debian)
 
 ```bash
@@ -206,7 +219,26 @@ make
 The `qsafe` binary is placed in the project root. To install it system-wide:
 
 ```bash
-sudo make install           # installs to /usr/local/bin (override with PREFIX=)
+sudo make install                # binary + man page (override with PREFIX=)
+sudo make install-completions    # optional: bash + zsh completions
+```
+
+### Verifying releases
+
+Release tarballs (from the `Release` workflow on a `v*` tag) are signed with
+[cosign](https://github.com/sigstore/cosign) using keyless signing — no
+pre-shared key. To verify a downloaded artifact:
+
+```bash
+# Checksum
+shasum -a 256 -c qsafe-v5.0.0-Linux-x86_64.tar.gz.sha256
+
+# Signature (replace OWNER/REPO with the actual repository)
+cosign verify-blob \
+  --bundle qsafe-v5.0.0-Linux-x86_64.tar.gz.cosign.bundle \
+  --certificate-identity-regexp "https://github.com/OWNER/REPO/.github/workflows/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  qsafe-v5.0.0-Linux-x86_64.tar.gz
 ```
 
 ### Verify Installation
