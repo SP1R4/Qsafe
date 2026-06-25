@@ -1,0 +1,65 @@
+name: CodeQL
+
+# Deep dataflow static analysis (complements cppcheck). Results appear in the
+# repo's Security tab. C/C++ needs a real build, so we install deps + liboqs and
+# run `make` between CodeQL init and analyze.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1"   # weekly, Monday 07:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/google-chrome.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev cmake ninja-build
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: liboqs-install
+          key: liboqs-0.12.0-${{ runner.os }}
+
+      - name: Build liboqs
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Install liboqs
+        run: |
+          sudo cp -r liboqs-install/include/* /usr/local/include/
+          sudo cp -r liboqs-install/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+
+      - name: Build
+        run: make
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
