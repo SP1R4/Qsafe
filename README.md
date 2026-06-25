@@ -357,6 +357,10 @@ qsafe --key-file project.key decrypt data.csv.qsafe
 
 ## File Formats
 
+> The complete byte-level specification — every field, the key-wrap and AEAD
+> construction, the secret-key and signature formats, and armor — lives in
+> **[docs/FORMAT.md](docs/FORMAT.md)**. The summary below is informative.
+
 ### Encrypted File
 
 ```
@@ -400,8 +404,8 @@ Offset  Size       Field
 0x108   8 bytes    modification time (seconds, LE)
 ```
 
-**Per-file overhead:** 33 + (N × 1660) + 272 + 16 bytes for N recipients
-(e.g. 1981 bytes for a single recipient).
+**Per-file overhead:** 21 + (N × 1660) + 272 + 16 bytes for N recipients
+(e.g. 1969 bytes for a single recipient).
 
 ### Secret Key File (`secret_key.bin`)
 

@@ -9,6 +9,11 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - CI quality gates: `-Werror` build, cppcheck static analysis (`quality.yml`).
 - `CONTRIBUTING.md` with build/test/static-analysis/security guidelines.
+- `docs/FORMAT.md`: complete byte-level on-disk format specification.
+
+### Fixed
+- README: corrected per-file overhead (21-byte header prefix, not 33; 1969
+  bytes for a single recipient).
 
 ## [5.0.0] - 2026-06-25
 
