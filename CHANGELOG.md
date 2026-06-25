@@ -6,6 +6,12 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-06-25
+
+Default encrypted-file format is now the framed **QSAFE006**. Not a breaking
+change for reading (decrypt still accepts QSAFE005), but `encrypt` output is
+unreadable by 5.x builds.
+
 ### Added
 - **Framed AEAD (QSAFE006):** encrypt now writes a framed format — the payload
   is a sequence of 64 KiB AES-256-GCM frames (counter+final-flag nonces), giving
@@ -59,7 +65,8 @@ files with a 4.x build first).
 - Switched to ML-KEM-1024; scrypt-wrapped secret keys; streaming decryption;
   CI and expanded tests.
 
-[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v6.0.0...HEAD
+[6.0.0]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...v6.0.0
 [5.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v5.0.0
 [4.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v4.0.0
 [3.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v3.0.0

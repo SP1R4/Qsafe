@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-6.0.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/NIST-FIPS%20203-orange" alt="NIST FIPS 203">
   <img src="https://img.shields.io/badge/language-C-lightgrey" alt="C">
@@ -231,14 +231,14 @@ pre-shared key. To verify a downloaded artifact:
 
 ```bash
 # Checksum
-shasum -a 256 -c qsafe-v5.0.0-Linux-x86_64.tar.gz.sha256
+shasum -a 256 -c qsafe-v6.0.0-Linux-x86_64.tar.gz.sha256
 
 # Signature
 cosign verify-blob \
-  --bundle qsafe-v5.0.0-Linux-x86_64.tar.gz.cosign.bundle \
+  --bundle qsafe-v6.0.0-Linux-x86_64.tar.gz.cosign.bundle \
   --certificate-identity-regexp "https://github.com/SP1R4/Qsafe/.github/workflows/release.yml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  qsafe-v5.0.0-Linux-x86_64.tar.gz
+  qsafe-v6.0.0-Linux-x86_64.tar.gz
 ```
 
 ### Verify Installation
@@ -548,7 +548,13 @@ wrong-passphrase rejection, and tamper detection.
 
 ## Compatibility
 
-Qsafe 5.0 is a **breaking change** from 4.x. Key establishment is now hybrid
+Qsafe 6.0 changes the default encrypted-file format to the framed **QSAFE006**
+(see [docs/FORMAT.md](docs/FORMAT.md)). This is **not** a breaking change for
+reading: `decrypt` accepts both QSAFE006 and QSAFE005, so files produced by 5.0
+still open. `encrypt` now writes QSAFE006, which 5.x builds cannot read — re-cut
+any ciphertext you need older builds to open. Keys are unchanged across 5.x→6.0.
+
+Qsafe 5.0 was a **breaking change** from 4.x. Key establishment is now hybrid
 (X25519 + ML-KEM-1024) and the file format (`QSAFE005`) carries per-recipient
 records, so keypairs and encrypted files must be regenerated: `QSAFE004` files
 cannot be read by 5.0 — decrypt them with a 4.x build, then re-encrypt. Secret

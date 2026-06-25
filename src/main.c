@@ -14,7 +14,7 @@
 #include "crypto_utils.h"
 
 #define PROGRAM_NAME "qsafe"
-#define VERSION "5.0.0"
+#define VERSION "6.0.0"
 #define MAX_PASSPHRASE 1024
 #define DEFAULT_SIGN_KEY_FILE "sign_key.bin"
 
