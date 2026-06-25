@@ -55,23 +55,5 @@ jobs:
           ./qsafe decrypt --key-file k.bin msg.qsafe out.txt
           cmp msg.txt out.txt && echo "round-trip OK"
 
-      - name: Diagnose multi-frame + armor (temporary, CWD-relative)
-        run: |
-          set -x
-          export QSAFE_PASSPHRASE=ci-pass
-          ./qsafe keygen --key-file dk.bin
-          dd if=/dev/urandom of=mf.in bs=1024 count=300
-          ./qsafe --force --key-file dk.bin encrypt mf.in mf.q
-          ./qsafe --force --key-file dk.bin decrypt mf.q mf.out
-          ls -l mf.in mf.q mf.out
-          cmp mf.in mf.out && echo "MF-OK" || echo "MF-DIFFER"
-          printf 'armor diagnostic payload\n' > a.txt
-          ./qsafe --force --key-file dk.bin encrypt --armor a.txt a.asc
-          ./qsafe --force --key-file dk.bin decrypt --armor a.asc a.out
-          cmp a.txt a.out && echo "ARMOR-OK" || (echo "ARMOR-DIFFER"; od -c a.out | head)
-          cp tests/fixtures/v5_key v5k; cp tests/fixtures/v5_msg.qsafe v5.q; cp tests/fixtures/v5_msg.expected v5.exp
-          QSAFE_PASSPHRASE=v5-fixture-pass ./qsafe --key-file v5k decrypt v5.q v5.dec
-          cmp v5.exp v5.dec && echo "V5-OK" || echo "V5-DIFFER"
-
       - name: Test suite
         run: make test
