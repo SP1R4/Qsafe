@@ -13,7 +13,7 @@ class Qsafe < Formula
   desc "Hybrid post-quantum file encryption and signing (X25519 + ML-KEM-1024)"
   homepage "https://github.com/SP1R4/Qsafe"
   url "https://github.com/SP1R4/Qsafe/archive/refs/tags/v6.0.0.tar.gz"
-  sha256 "ebc8bd01f90c4fc28c622df04dc3dcf290b5e884810b88d408e8093eb20bd83b"
+  sha256 "def12946cec4eff59746bb467562c055b9d63dcd805738b88a969934919f5177"
   license "MIT"
 
   depends_on "openssl@3"
