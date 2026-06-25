@@ -155,9 +155,15 @@ check_ok "decrypt into a directory succeeds" \
 check_ok "original filename restored inside directory" \
     diff -q "$TMPDIR/test_input.txt" "$TMPDIR/restore_here/test_input.txt"
 
-# --- Test 5c: permission bits preserved ---
+# --- Test 5c: permission bits preserved (POSIX only) ---
+# Windows has no POSIX mode bits, so Qsafe restores only the mtime there.
 echo ""
 echo "[test: permission metadata preserved]"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    pass "permission preservation skipped (no POSIX mode bits on Windows)"
+    ;;
+  *)
 echo "perm test" > "$TMPDIR/perm.txt"
 chmod 600 "$TMPDIR/perm.txt"
 "$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/perm.txt" "$TMPDIR/perm.enc" >/dev/null 2>&1
@@ -167,6 +173,8 @@ rm -f "$TMPDIR/perm.txt"
 # GNU's -f means --file-system and would succeed with the wrong output.
 MODE=$(stat -c "%a" "$TMPDIR/perm.txt" 2>/dev/null || stat -f "%Lp" "$TMPDIR/perm.txt" 2>/dev/null)
 if [ "$MODE" = "600" ]; then pass "decrypted file mode is 600"; else fail "decrypted file mode is 600 (got $MODE)"; fi
+    ;;
+esac
 
 # --- Test 6: wrong passphrase rejection ---
 echo ""
