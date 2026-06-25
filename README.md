@@ -170,7 +170,7 @@ Encrypted File --> Verify Header --> KEM Ciphertext -------------------+
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew install <you>/qsafe/qsafe   # from a tap; see packaging/qsafe.rb
+brew install SP1R4/qsafe/qsafe   # from a tap; see packaging/qsafe.rb
 ```
 
 ### Docker
@@ -233,10 +233,10 @@ pre-shared key. To verify a downloaded artifact:
 # Checksum
 shasum -a 256 -c qsafe-v5.0.0-Linux-x86_64.tar.gz.sha256
 
-# Signature (replace OWNER/REPO with the actual repository)
+# Signature
 cosign verify-blob \
   --bundle qsafe-v5.0.0-Linux-x86_64.tar.gz.cosign.bundle \
-  --certificate-identity-regexp "https://github.com/OWNER/REPO/.github/workflows/release.yml@.*" \
+  --certificate-identity-regexp "https://github.com/SP1R4/Qsafe/.github/workflows/release.yml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   qsafe-v5.0.0-Linux-x86_64.tar.gz
 ```
