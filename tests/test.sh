@@ -252,10 +252,17 @@ check_fail "old passphrase no longer works" \
     env QSAFE_PASSPHRASE="$QSAFE_PASSPHRASE" "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc"
 check_ok "new passphrase decrypts existing ciphertext" \
     env QSAFE_PASSPHRASE="new-rekey-pass" "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc"
-# Restore the original passphrase so the suite ends in a known state.
+# Restore the original passphrase so the suite ends in a known state. Use a real
+# file (not process substitution) for --passphrase-file, since a native Windows
+# binary cannot read /dev/fd/* from MSYS process substitution.
+echo "new-rekey-pass" > "$TMPDIR/curpp.txt"
 printf '%s\n%s\n' "$QSAFE_PASSPHRASE" "$QSAFE_PASSPHRASE" | \
-    env QSAFE_PASSPHRASE="new-rekey-pass" "$BINARY" --key-file "$KEYFILE" rekey \
-    --passphrase-file <(echo "new-rekey-pass") > /dev/null 2>&1
+    "$BINARY" --key-file "$KEYFILE" rekey --passphrase-file "$TMPDIR/curpp.txt" > /dev/null 2>&1
+if "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/test_input.enc" >/dev/null 2>&1; then
+    pass "passphrase restored after rekey"
+else
+    fail "passphrase restored after rekey"
+fi
 
 # --- Test 12: configurable scrypt cost ---
 echo ""
