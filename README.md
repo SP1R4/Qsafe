@@ -3,12 +3,12 @@
   <p align="center">
     Post-quantum file encryption built for the future.
     <br />
-    <strong>ML-KEM-1024 + AES-256-GCM + HKDF-SHA256 + scrypt</strong>
+    <strong>X25519 + ML-KEM-1024 + AES-256-GCM + HKDF-SHA256 + scrypt + ML-DSA-87</strong>
   </p>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-5.0.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/NIST-FIPS%20203-orange" alt="NIST FIPS 203">
   <img src="https://img.shields.io/badge/language-C-lightgrey" alt="C">
@@ -20,23 +20,27 @@
 
 Qsafe is a command-line file encryption tool that combines **post-quantum key encapsulation** with **classical authenticated encryption** to provide long-term data confidentiality against both classical and quantum adversaries.
 
-It uses **ML-KEM-1024** (NIST FIPS 203, formerly CRYSTALS-Kyber) for key encapsulation and **AES-256-GCM** for authenticated encryption. The KEM shared secret is expanded with **HKDF-SHA256**; the secret key is protected at rest with a key derived from your passphrase using **scrypt**, a memory-hard password KDF.
+It uses a **hybrid** key-establishment scheme — classical **X25519** Diffie–Hellman combined with post-quantum **ML-KEM-1024** (NIST FIPS 203, formerly CRYSTALS-Kyber) — so a file stays confidential unless an attacker breaks *both* layers. The two shared secrets are combined with **HKDF-SHA256** into a key that wraps a random content key; the payload is sealed with **AES-256-GCM**. Secret keys are protected at rest with a key derived from your passphrase using **scrypt**, a memory-hard KDF. Qsafe can also create and verify detached **ML-DSA-87** (Dilithium, Level 5) signatures.
 
 Qsafe follows a true public-key workflow: you generate a keypair **once** with `keygen`, then encrypt to the public key (no passphrase needed) and decrypt with the passphrase-wrapped secret key. Encrypted files are durable — encrypting a second file never invalidates the first.
 
 ### Key Features
 
-- **Quantum-resistant** — ML-KEM-1024 (NIST FIPS 203, security Level 5)
+- **Hybrid quantum-resistant** — X25519 + ML-KEM-1024 (NIST FIPS 203, Level 5); break-one-stay-secure
+- **Multi-recipient** — encrypt once to several public keys (`-r`); any one secret key decrypts
+- **Detached signatures** — `sign` / `verify-sig` using ML-DSA-87 for sender authenticity
 - **Durable public-key workflow** — generate a keypair once; encrypt with the public key, decrypt with the secret key. Encrypting never overwrites your keys.
-- **Authenticated encryption** — AES-256-GCM provides confidentiality *and* integrity; the file header, nonce, and KEM ciphertext are authenticated as additional data (AAD)
+- **Authenticated encryption** — AES-256-GCM provides confidentiality *and* integrity; the entire header (magic, recipient records, nonce) is authenticated as additional data (AAD)
 - **Streaming architecture** — constant memory usage for both encryption and decryption via 4 KB chunked I/O
 - **Pipe-friendly** — use `-` for stdin/stdout, so Qsafe composes with `tar`, `ssh`, and friends
+- **Armored output** — `--armor` emits/consumes ASCII base64 for email and chat
+- **Inspect & verify** — `inspect` reports a file's type without decrypting; `verify` / `--check` authenticate without writing plaintext
+- **Key maintenance** — `rekey` changes a key's passphrase; `--scrypt-cost` tunes the KDF hardness
 - **Metadata preservation** — the original filename, permission bits, and modification time are encrypted alongside the data and restored on decrypt
 - **Smart defaults** — files vs. directories are auto-detected and output paths are inferred when omitted
 - **Flexible passphrase entry** — interactive no-echo prompt, `$QSAFE_PASSPHRASE`, or `--passphrase-file` (never required on the command line)
-- **Passphrase-protected keys** — secret keys are wrapped with a scrypt-derived key and a random salt
 - **Batch processing** — recursively encrypt or decrypt entire directory trees
-- **Tamper detection** — modified ciphertext, header, nonce, or KEM ciphertext is rejected
+- **Tamper detection** — any modification to the ciphertext, header, or recipient records is rejected
 - **Cross-platform** — builds on Linux and macOS (Homebrew)
 
 ---
@@ -64,11 +68,20 @@ Qsafe follows a true public-key workflow: you generate a keypair **once** with `
 
 | Component | Algorithm | Specification | Notes |
 |:--|:--|:--|:--|
+| Classical key exchange | X25519 | RFC 7748 | Hybrid classical layer |
 | Key Encapsulation | ML-KEM-1024 | NIST FIPS 203 | Level 5 (AES-256 equivalent) |
+| Signatures | ML-DSA-87 | NIST FIPS 204 | Dilithium Level 5, detached |
 | Symmetric Encryption | AES-256-GCM | NIST SP 800-38D | 256-bit, authenticated |
-| Shared-secret KDF | HKDF-SHA256 | RFC 5869 | KEM secret → AES key |
-| Passphrase KDF | scrypt (N=2¹⁵, r=8, p=1) | RFC 7914 | Memory-hard key wrapping |
+| Shared-secret KDF | HKDF-SHA256 | RFC 5869 | (X25519 ‖ ML-KEM) → key-wrap key |
+| Passphrase KDF | scrypt (N=2¹⁵ default, r=8, p=1) | RFC 7914 | Memory-hard key wrapping, tunable |
 | Random Generation | OpenSSL `RAND_bytes` | CSPRNG | System entropy |
+
+Encryption generates a random content-encryption key (CEK) that seals the
+payload with AES-256-GCM. For each recipient the CEK is independently wrapped
+under a key derived (via HKDF) from the combination of an ephemeral X25519 DH
+and an ML-KEM-1024 encapsulation to that recipient — so one ciphertext can be
+opened by any one of several secret keys, and only by breaking both the
+classical and the post-quantum layer.
 
 ### Encryption Flow
 
@@ -104,15 +117,16 @@ Qsafe follows a true public-key workflow: you generate a keypair **once** with `
        |                                            +-------+--------+
        |                                                    |
        v                                                    v
-+------+----------------------------------------------------+------+
-| QSAFE004 | Nonce (12 B) | KEM Ciphertext (1568 B) | AES Ciphertext | Tag |
-+-----------+-------------+-------------------------+----------------+-----+
- \____________ authenticated as GCM AAD _______________/
++----------+-------+-----------+---------------------+----------------+-----+
+| QSAFE005 | count | Nonce(12) | Recipient record(s) | AES Ciphertext | Tag |
++----------+-------+-----------+---------------------+----------------+-----+
+ \________________ authenticated as GCM AAD __________________/
 
-The AES ciphertext covers a fixed 272-byte metadata block (original name,
-mode, mtime) followed by the file contents. The nonce sits at the front so
-decryption can stream straight from a pipe; the 16-byte tag is the trailing
-bytes of the stream.
+Each recipient record is: ephemeral X25519 pub (32) ‖ ML-KEM ciphertext (1568)
+‖ wrap nonce (12) ‖ wrapped CEK (32) ‖ wrap tag (16). The AES ciphertext covers
+a fixed 272-byte metadata block (original name, mode, mtime) followed by the
+file contents. The payload nonce sits at the front so decryption can stream
+straight from a pipe; the 16-byte payload tag is the trailing bytes.
 ```
 
 ### Decryption Flow
@@ -153,6 +167,19 @@ Encrypted File --> Verify Header --> KEM Ciphertext -------------------+
 
 ## Installation
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install <you>/qsafe/qsafe   # from a tap; see packaging/qsafe.rb
+```
+
+### Docker
+
+```bash
+docker build -t qsafe .
+docker run --rm -e QSAFE_PASSPHRASE=secret -v "$PWD:/data" qsafe keygen --key-file /data/key.bin
+```
+
 ### Automated (macOS or Ubuntu/Debian)
 
 ```bash
@@ -192,7 +219,26 @@ make
 The `qsafe` binary is placed in the project root. To install it system-wide:
 
 ```bash
-sudo make install           # installs to /usr/local/bin (override with PREFIX=)
+sudo make install                # binary + man page (override with PREFIX=)
+sudo make install-completions    # optional: bash + zsh completions
+```
+
+### Verifying releases
+
+Release tarballs (from the `Release` workflow on a `v*` tag) are signed with
+[cosign](https://github.com/sigstore/cosign) using keyless signing — no
+pre-shared key. To verify a downloaded artifact:
+
+```bash
+# Checksum
+shasum -a 256 -c qsafe-v5.0.0-Linux-x86_64.tar.gz.sha256
+
+# Signature (replace OWNER/REPO with the actual repository)
+cosign verify-blob \
+  --bundle qsafe-v5.0.0-Linux-x86_64.tar.gz.cosign.bundle \
+  --certificate-identity-regexp "https://github.com/OWNER/REPO/.github/workflows/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  qsafe-v5.0.0-Linux-x86_64.tar.gz
 ```
 
 ### Verify Installation
@@ -208,9 +254,15 @@ sudo make install           # installs to /usr/local/bin (override with PREFIX=)
 ### Synopsis
 
 ```
-qsafe keygen  [options]
-qsafe encrypt [options] <input> [output]
-qsafe decrypt [options] <input> [output]
+qsafe keygen      [options]
+qsafe encrypt     [options] <input> [output]
+qsafe decrypt     [options] <input> [output]
+qsafe verify      [options] <input>
+qsafe rekey       [options]
+qsafe inspect     <file>
+qsafe sign-keygen [options]
+qsafe sign        [options] <input> [signature]
+qsafe verify-sig  [options] <input> [signature]
 ```
 
 Files and directories are detected automatically — there is no `file|dir`
@@ -222,18 +274,28 @@ input or output to read from stdin / write to stdout.
 
 | Command | Description |
 |:--|:--|
-| `keygen` | Generate an ML-KEM-1024 keypair (run once). Needs the passphrase. |
-| `encrypt` | Encrypt a file or directory using the public key. **No passphrase needed.** |
+| `keygen` | Generate a hybrid X25519 + ML-KEM-1024 keypair (run once). Needs the passphrase. |
+| `encrypt` | Encrypt a file or directory to one or more public keys. **No passphrase needed.** |
 | `decrypt` | Decrypt a file or directory using the passphrase-wrapped secret key. |
+| `verify` | Authenticate an encrypted file/directory without writing plaintext. |
+| `rekey` | Change the passphrase protecting a secret key (keypair unchanged). |
+| `inspect` | Report what a key or encrypted file is, without decrypting. |
+| `sign-keygen` | Generate an ML-DSA-87 signing keypair (default `sign_key.bin`). |
+| `sign` | Create a detached signature for a file (default `<input>.sig`). |
+| `verify-sig` | Verify a detached signature against a file. |
 
 ### Options
 
 | Option | Description |
 |:--|:--|
-| `--key-file <path>` | Secret key file (default: `secret_key.bin`) |
+| `--key-file <path>` | Secret key file (default: `secret_key.bin`; `sign_key.bin` for signing) |
 | `--pub-file <path>` | Public key file (default: `<key-file>.pub`) |
+| `-r, --recipient <path>` | Add a recipient public key when encrypting (repeatable) |
 | `--passphrase <str>` | Passphrase (discouraged — visible to other users) |
 | `--passphrase-file <path>` | Read the passphrase from the first line of a file |
+| `--check` | decrypt/verify: authenticate only, write nothing |
+| `--armor` | encrypt: ASCII base64 output; decrypt: base64 input |
+| `--scrypt-cost <n>` | keygen/rekey: scrypt cost as log2(N), 14–22 (default 15) |
 | `--verbose` | Print detailed information |
 | `--force` | Overwrite existing output without prompting |
 | `--help` | Display usage information |
@@ -300,17 +362,29 @@ qsafe --key-file project.key decrypt data.csv.qsafe
 ```
 Offset       Size          Field
 -----------  ------------  ----------------------------
-0x0000       8 bytes       Version header ("QSAFE004")
-0x0008       12 bytes      GCM nonce (IV)
-0x0014       1568 bytes    ML-KEM-1024 KEM ciphertext
-0x0634       variable      AES-256-GCM ciphertext (metadata + data)
+0x0000       8 bytes       Version header ("QSAFE005")
+0x0008       1 byte        recipient count (1..16)
+0x0009       12 bytes      payload GCM nonce (IV)
+0x0015       N * 1660      recipient records (see below)
+...          variable      AES-256-GCM ciphertext (metadata + data)
 EOF - 16     16 bytes      GCM authentication tag
 ```
 
-The header, nonce, and KEM ciphertext are authenticated as GCM additional
-data, so tampering with any of them is detected. The nonce sits at the front
-so decryption can stream from a pipe without seeking; the tag is the final
-16 bytes of the stream.
+Each recipient record (1660 bytes) is:
+
+```
+ephemeral X25519 public key   32 bytes
+ML-KEM-1024 ciphertext      1568 bytes
+CEK wrap nonce                12 bytes
+wrapped content key (CEK)     32 bytes
+CEK wrap tag                  16 bytes
+```
+
+The entire header — magic, recipient count, payload nonce, and every recipient
+record — is authenticated as GCM additional data, so tampering with any of it
+(including reordering or swapping records) is detected. The payload nonce sits
+near the front so decryption can stream from a pipe without seeking; the tag is
+the final 16 bytes of the stream.
 
 The AES ciphertext begins with a fixed **272-byte metadata block** (encrypted
 and authenticated alongside the data) before the file contents:
@@ -326,27 +400,35 @@ Offset  Size       Field
 0x108   8 bytes    modification time (seconds, LE)
 ```
 
-**Per-file overhead:** 1876 bytes (8 + 12 + 1568 + 272 + 16)
+**Per-file overhead:** 33 + (N × 1660) + 272 + 16 bytes for N recipients
+(e.g. 1981 bytes for a single recipient).
 
 ### Secret Key File (`secret_key.bin`)
 
 ```
 Offset       Size          Field
 -----------  ------------  ----------------------------
-0x0000       12 bytes      AES-GCM nonce
-0x000C       16 bytes      scrypt salt
-0x001C       3168 bytes    Encrypted ML-KEM-1024 secret key
-0x0C7C       16 bytes      AES-GCM authentication tag
+0x0000       8 bytes       Key-file magic ("QSAFEK01")
+0x0008       8 bytes       scrypt N (LE)
+0x0010       4 bytes       scrypt r (LE)
+0x0014       4 bytes       scrypt p (LE)
+0x0018       12 bytes      AES-GCM nonce
+0x0024       16 bytes      scrypt salt
+0x0034       variable      Encrypted secret key (X25519 ‖ ML-KEM-1024)
+EOF - 16     16 bytes      AES-GCM authentication tag
 ```
 
-**Fixed size:** 3212 bytes (written with `0600` permissions)
+The magic and scrypt parameters are authenticated as additional data, so the
+KDF cost is self-describing and tamper-evident. Written with `0600`
+permissions. (Signing secret keys use the same wrapper format.)
 
 ### Public Key File (`secret_key.bin.pub`)
 
 ```
 Offset       Size          Field
 -----------  ------------  ----------------------------
-0x0000       1568 bytes    Raw ML-KEM-1024 public key
+0x0000       32 bytes      Raw X25519 public key
+0x0020       1568 bytes    Raw ML-KEM-1024 public key
 ```
 
 Stored in the clear — it contains no secret material and is all that
@@ -360,9 +442,9 @@ Stored in the clear — it contains no secret material and is all that
 
 | File | Size | Contents |
 |:--|:--|:--|
-| `secret_key.bin` | 3212 bytes | Passphrase-encrypted ML-KEM-1024 secret key (`0600`) |
-| `secret_key.bin.pub` | 1568 bytes | Raw ML-KEM-1024 public key (encryption only) |
-| `<name>.qsafe` | input size + 1876 bytes | KEM ciphertext + AES-GCM encrypted data + metadata |
+| `secret_key.bin` | ~3.3 KB | Passphrase-encrypted X25519 + ML-KEM-1024 secret key (`0600`) |
+| `secret_key.bin.pub` | 1600 bytes | Raw X25519 + ML-KEM-1024 public key (encryption only) |
+| `<name>.qsafe` | input + ~2 KB/recipient | Recipient records + AES-GCM encrypted data + metadata |
 
 ### Best Practices
 
@@ -384,11 +466,20 @@ Stored in the clear — it contains no secret material and is all that
 
 ## Security Model
 
+> **Qsafe has not been independently audited.** It is built on well-reviewed
+> primitives (OpenSSL, liboqs) and backed by known-answer tests, sanitizer/
+> Valgrind CI, and a fuzzing harness — but the surrounding code has not had a
+> third-party review. For the full picture of what is and isn't protected, read
+> the **[Threat Model](THREAT_MODEL.md)**. To report a vulnerability, see
+> **[SECURITY.md](SECURITY.md)**.
+
 | Threat | Mitigation |
 |:--|:--|
-| Quantum key recovery | ML-KEM-1024 (NIST Level 5) resists known quantum algorithms |
-| Ciphertext / header tampering | AES-256-GCM authenticates the payload and the header + nonce + KEM ciphertext (AAD) |
-| Passphrase guessing on a stolen key file | scrypt (memory-hard) with a random salt slows brute force |
+| Quantum key recovery | ML-KEM-1024 (NIST Level 5), combined with X25519 — breaking one layer is not enough |
+| Cryptanalytic break of one primitive | Hybrid X25519 + ML-KEM: an attacker must break *both* |
+| Ciphertext / header tampering | AES-256-GCM authenticates the payload and the entire header (magic, recipient records, nonce) as AAD |
+| File forgery / wrong sender | `sign` / `verify-sig` (ML-DSA-87) provide sender authenticity |
+| Passphrase guessing on a stolen key file | scrypt (memory-hard, tunable cost) with a random salt slows brute force |
 | Key file compromise without passphrase | Secret key is AES-256-GCM encrypted with a scrypt-derived key |
 | Memory exposure | Key material is wiped (`OPENSSL_cleanse`) before deallocation |
 
@@ -396,13 +487,16 @@ Stored in the clear — it contains no secret material and is all that
 
 - **Lost `secret_key.bin`** — encrypted files are permanently unrecoverable. There is no backdoor.
 - **Forgotten passphrase** — the secret key cannot be decrypted. Data is permanently lost.
-- **Modified ciphertext** — decryption fails with an integrity error; the partial output file is removed.
+- **Modified ciphertext** — decryption fails with an integrity error; the partial output **file** is removed (but see the streaming caveat below).
 
 ### Known Limitations
 
-- Filenames are padded to a fixed 256-byte field but the *length* of the plaintext (and thus the file size) is not otherwise hidden; Qsafe does not pad data to obscure file sizes.
-- When `--passphrase` is used it is visible in the process list and shell history. The interactive prompt, `$QSAFE_PASSPHRASE`, and `--passphrase-file` avoid this.
-- Anyone with your public key can produce valid ciphertexts for you; Qsafe provides confidentiality and integrity, not sender authentication.
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the complete list. The most important:
+
+- **Metadata leakage:** Qsafe does not pad, so the approximate plaintext size and the recipient *count* are visible. The filename, mode, and mtime are encrypted.
+- **No forward secrecy for long-term keys:** if a secret key (and passphrase) are later compromised, all past files encrypted to it can be decrypted.
+- **Streaming and authentication:** the auth tag is only checked at end-of-stream. For **pipe/stdout** output, Qsafe buffers plaintext in memory and releases it only after the tag verifies (so nothing is emitted on failure — at the cost of holding the payload in RAM; decrypt large inputs to a file). For **file** output it streams and deletes the result on failure. Always check the exit code before treating output as authentic.
+- **`--passphrase` on the CLI** is visible in the process list / shell history; prefer the prompt, `$QSAFE_PASSPHRASE`, or `--passphrase-file`.
 
 ---
 
@@ -448,12 +542,14 @@ wrong-passphrase rejection, and tamper detection.
 
 ## Compatibility
 
-Qsafe 4.0 is a **breaking change** from 3.x. The file format moved the nonce to
-the front, added an encrypted metadata block, and adopted a true public-key
-workflow (separate `keygen`). `QSAFE003` files cannot be read by 4.0 — decrypt
-them with a 3.x build first. The CLI also changed: the trailing `file|dir`
-argument is gone (types are auto-detected), output paths are optional, and the
-binary is now `qsafe` (previously `crypto-v2`).
+Qsafe 5.0 is a **breaking change** from 4.x. Key establishment is now hybrid
+(X25519 + ML-KEM-1024) and the file format (`QSAFE005`) carries per-recipient
+records, so keypairs and encrypted files must be regenerated: `QSAFE004` files
+cannot be read by 5.0 — decrypt them with a 4.x build, then re-encrypt. Secret
+key files also gained a self-describing scrypt-cost header (`QSAFEK01`); 4.x
+keys without it are still accepted. New commands (`verify`, `rekey`, `inspect`,
+`sign-keygen`, `sign`, `verify-sig`) and options (`-r/--recipient`, `--armor`,
+`--check`, `--scrypt-cost`) are additive.
 
 ---
 

@@ -1,4 +1,4 @@
-# Qsafe 4.0 Flow
+# Qsafe 5.0 Flow
 
 ## Key generation (`qsafe keygen`, run once)
 

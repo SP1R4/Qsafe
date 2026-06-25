@@ -4,6 +4,9 @@ crypto
 crypto-v2
 qsafe
 tests/test_crypto
+tests/fuzz_decrypt
+*.dSYM/
+corpus/
 
 # macOS
 .DS_Store

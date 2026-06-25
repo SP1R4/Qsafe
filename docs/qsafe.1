@@ -1,0 +1,138 @@
+.TH QSAFE 1 "2026" "Qsafe 5.0.0" "User Commands"
+.SH NAME
+qsafe \- hybrid post-quantum file encryption and signing
+.SH SYNOPSIS
+.B qsafe
+.I command
+.RI [ options ]
+.RI [ input ]
+.RI [ output ]
+.SH DESCRIPTION
+.B qsafe
+encrypts files using a hybrid key-establishment scheme that combines the
+classical
+.B X25519
+Diffie\-Hellman exchange with the post\-quantum
+.B ML\-KEM\-1024
+(NIST FIPS 203) key encapsulation mechanism. The resulting shared secrets are
+combined with HKDF\-SHA256 and used to wrap a random content key that protects
+the payload with
+.BR AES\-256\-GCM .
+A file therefore stays confidential unless an attacker breaks
+.I both
+the classical and the post\-quantum layer.
+.PP
+Secret keys are stored on disk wrapped with a key derived from a passphrase
+using the memory\-hard
+.B scrypt
+KDF. Encrypted files preserve the original name, permission bits and
+modification time, and may be addressed to multiple recipients at once.
+.PP
+.B qsafe
+can also create and verify detached
+.B ML\-DSA\-87
+(Dilithium, Level 5) signatures.
+.SH COMMANDS
+.TP
+.B keygen
+Generate a hybrid X25519 + ML\-KEM\-1024 keypair. Run once.
+.TP
+.B encrypt " " \fIinput\fR " " [\fIoutput\fR]
+Encrypt a file or directory to one or more public keys.
+.TP
+.B decrypt " " \fIinput\fR " " [\fIoutput\fR]
+Decrypt a file or directory using the secret key.
+.TP
+.B verify " " \fIinput\fR
+Authenticate an encrypted file or directory without writing any plaintext.
+.TP
+.B rekey
+Change the passphrase that protects a secret key, without regenerating it.
+.TP
+.B inspect " " \fIfile\fR
+Report what a key or encrypted file is, without decrypting it.
+.TP
+.B sign-keygen
+Generate an ML\-DSA\-87 signing keypair.
+.TP
+.B sign " " \fIinput\fR " " [\fIsignature\fR]
+Create a detached signature for a file (default \fIinput\fR.sig).
+.TP
+.B verify-sig " " \fIinput\fR " " [\fIsignature\fR]
+Verify a detached signature against a file.
+.SH OPTIONS
+.TP
+.BI \-\-key\-file " path"
+Secret key file (default: secret_key.bin; sign_key.bin for signing commands).
+.TP
+.BI \-\-pub\-file " path"
+Public key file (default: <key\-file>.pub).
+.TP
+.BR \-r ", " \-\-recipient " " \fIpath\fR
+Add a recipient public key when encrypting. May be given multiple times.
+.TP
+.BI \-\-passphrase " str"
+Passphrase on the command line (discouraged; visible to other users).
+.TP
+.BI \-\-passphrase\-file " path"
+Read the passphrase from the first line of a file.
+.TP
+.B \-\-check
+For decrypt/verify: authenticate only, write no plaintext.
+.TP
+.B \-\-armor
+Encrypt to ASCII base64 text; decrypt from base64 text.
+.TP
+.BI \-\-scrypt\-cost " n"
+scrypt cost as log2(N), 14\-22 (default 15), used by keygen/rekey.
+.TP
+.B \-\-verbose
+Enable verbose output.
+.TP
+.B \-\-force
+Overwrite output files without prompting.
+.TP
+.B \-\-help
+Show usage.
+.TP
+.B \-\-version
+Show version.
+.SH ENVIRONMENT
+.TP
+.B QSAFE_PASSPHRASE
+If set, used as the passphrase when none is given on the command line.
+.SH EXAMPLES
+.PP
+Generate a keypair, then encrypt and decrypt a file:
+.PP
+.RS
+.nf
+qsafe keygen
+qsafe encrypt report.pdf
+qsafe decrypt report.pdf.qsafe
+.fi
+.RE
+.PP
+Encrypt to two recipients:
+.PP
+.RS
+.nf
+qsafe encrypt -r alice.pub -r bob.pub secret.txt
+.fi
+.RE
+.PP
+Sign and verify a release artifact:
+.PP
+.RS
+.nf
+qsafe sign-keygen
+qsafe sign release.tar.gz
+qsafe verify-sig release.tar.gz release.tar.gz.sig
+.fi
+.RE
+.SH EXIT STATUS
+.B qsafe
+exits 0 on success and non\-zero on error (including failed authentication or
+signature verification).
+.SH SEE ALSO
+Project documentation in README.md.

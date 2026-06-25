@@ -1,0 +1,46 @@
+#compdef qsafe
+# zsh completion for qsafe
+# Install: place this file (named _qsafe) in a directory on your $fpath, e.g.
+#   $(brew --prefix)/share/zsh/site-functions/  or  ~/.zsh/completions/
+
+_qsafe() {
+    local -a commands
+    commands=(
+        'keygen:Generate a hybrid X25519 + ML-KEM-1024 keypair'
+        'encrypt:Encrypt a file or directory to one or more public keys'
+        'decrypt:Decrypt a file or directory'
+        'verify:Authenticate an encrypted file without writing plaintext'
+        'rekey:Change the passphrase protecting a secret key'
+        'inspect:Show what a key or encrypted file is, without decrypting'
+        'sign-keygen:Generate an ML-DSA-87 signing keypair'
+        'sign:Create a detached signature for a file'
+        'verify-sig:Verify a detached signature against a file'
+        'help:Show usage'
+        'version:Show version'
+    )
+
+    _arguments -C \
+        '(--key-file)--key-file[Secret key file]:key file:_files' \
+        '(--pub-file)--pub-file[Public key file]:public key:_files' \
+        '*'{-r,--recipient}'[Add a recipient public key]:public key:_files' \
+        '--passphrase[Passphrase (discouraged)]:passphrase:' \
+        '--passphrase-file[Read passphrase from file]:file:_files' \
+        '--check[Authenticate only; write nothing]' \
+        '--armor[Base64 text input/output]' \
+        '--scrypt-cost[scrypt cost log2(N)]:cost:(14 15 16 17 18 19 20 21 22)' \
+        '--verbose[Verbose output]' \
+        '--force[Overwrite without prompting]' \
+        '--help[Show usage]' \
+        '--version[Show version]' \
+        '1: :->command' \
+        '*: :_files' \
+        && return 0
+
+    case "$state" in
+        command)
+            _describe -t commands 'qsafe command' commands
+            ;;
+    esac
+}
+
+_qsafe "$@"

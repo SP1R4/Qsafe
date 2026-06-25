@@ -1,0 +1,26 @@
+name: Quality
+
+# Static analysis. cppcheck does not compile the code, so it needs no liboqs/
+# OpenSSL install — system headers are intentionally not analyzed.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cppcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,performance,portability \
+            --std=c11 --inline-suppr --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            -Iinclude \
+            src/crypto_utils.c src/main.c

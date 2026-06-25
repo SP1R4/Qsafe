@@ -94,17 +94,20 @@ static void test_derive_key_from_passphrase(void) {
 
     unsigned char k1[AES_KEY_SIZE], k2[AES_KEY_SIZE], k3[AES_KEY_SIZE], k4[AES_KEY_SIZE];
 
-    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt1, k1) == CRYPTO_SUCCESS,
+    /* Use the default scrypt cost (N=2^15, r=8, p=1). */
+    const uint64_t N = 1ULL << 15; const uint32_t R = 8, P = 1;
+
+    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt1, N, R, P, k1) == CRYPTO_SUCCESS,
            "scrypt derivation returns CRYPTO_SUCCESS");
-    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt1, k2) == CRYPTO_SUCCESS,
+    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt1, N, R, P, k2) == CRYPTO_SUCCESS,
            "second scrypt derivation returns CRYPTO_SUCCESS");
     ASSERT(memcmp(k1, k2, AES_KEY_SIZE) == 0, "same passphrase + salt is deterministic");
 
-    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt2, k3) == CRYPTO_SUCCESS,
+    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt2, N, R, P, k3) == CRYPTO_SUCCESS,
            "scrypt derivation with different salt succeeds");
     ASSERT(memcmp(k1, k3, AES_KEY_SIZE) != 0, "different salt produces different key");
 
-    ASSERT(crypto_derive_key_from_passphrase("different", salt1, k4) == CRYPTO_SUCCESS,
+    ASSERT(crypto_derive_key_from_passphrase("different", salt1, N, R, P, k4) == CRYPTO_SUCCESS,
            "scrypt derivation with different passphrase succeeds");
     ASSERT(memcmp(k1, k4, AES_KEY_SIZE) != 0, "different passphrase produces different key");
 }
@@ -192,7 +195,7 @@ static void test_save_load_public_key(void) {
 }
 
 /* Encrypts then decrypts a buffer of the given size and checks the round-trip. */
-static void roundtrip_case(OQS_KEM *kem, uint8_t *public_key, uint8_t *secret_key,
+static void roundtrip_case(OQS_KEM *kem, const unsigned char *pub, const unsigned char *sec,
                            size_t size, const char *label) {
     const char *plain = "/tmp/test_qsafe_rt_plain.bin";
     const char *enc = "/tmp/test_qsafe_rt_enc.bin";
@@ -205,18 +208,18 @@ static void roundtrip_case(OQS_KEM *kem, uint8_t *public_key, uint8_t *secret_ke
     ASSERT(write_file(plain, data, size), label);
     free(data);
 
-    unsigned char aes_key[AES_KEY_SIZE];
     crypto_config_t config = {
         .verbose = 0,
         .force_overwrite = 1,
         .secret_key_file = DEFAULT_SECRET_KEY_FILE,
         .passphrase = "test-pass"
     };
+    const unsigned char *recips[1] = { pub };
 
-    crypto_error_t ret = crypto_encrypt_file(plain, enc, kem, aes_key, public_key, secret_key, &config);
+    crypto_error_t ret = crypto_encrypt_file(plain, enc, kem, recips, 1, &config);
     ASSERT(ret == CRYPTO_SUCCESS, label);
 
-    ret = crypto_decrypt_file(enc, dec, kem, aes_key, public_key, secret_key, &config);
+    ret = crypto_decrypt_file(enc, dec, kem, sec, &config);
     ASSERT(ret == CRYPTO_SUCCESS, label);
 
     ASSERT(files_equal(plain, dec), label);
@@ -233,76 +236,77 @@ static void test_encrypt_decrypt_file(void) {
     ASSERT(kem != NULL, "initialize ML-KEM-1024 KEM");
     if (!kem) return;
 
-    uint8_t *public_key = malloc(kem->length_public_key);
-    uint8_t *secret_key = malloc(kem->length_secret_key);
-    ASSERT(public_key != NULL && secret_key != NULL, "allocate keypair memory");
-    if (!public_key || !secret_key) {
-        free(public_key); free(secret_key); OQS_KEM_free(kem);
-        return;
-    }
-
-    ASSERT(OQS_KEM_keypair(kem, public_key, secret_key) == OQS_SUCCESS, "generate ML-KEM keypair");
+    unsigned char *pub = NULL, *sec = NULL;
+    size_t publen = 0, seclen = 0;
+    ASSERT(crypto_generate_identity(kem, &pub, &publen, &sec, &seclen) == CRYPTO_SUCCESS,
+           "generate hybrid identity");
+    if (!pub || !sec) { free(pub); free(sec); OQS_KEM_free(kem); return; }
 
     /* Round-trip across sizes: empty, single-chunk, and multi-chunk (streaming). */
-    roundtrip_case(kem, public_key, secret_key, 0, "round-trip: empty file");
-    roundtrip_case(kem, public_key, secret_key, 100, "round-trip: small single-chunk file");
-    roundtrip_case(kem, public_key, secret_key, 4096, "round-trip: exact one-chunk file");
-    roundtrip_case(kem, public_key, secret_key, 100000, "round-trip: multi-chunk file (streaming)");
+    roundtrip_case(kem, pub, sec, 0, "round-trip: empty file");
+    roundtrip_case(kem, pub, sec, 100, "round-trip: small single-chunk file");
+    roundtrip_case(kem, pub, sec, 4096, "round-trip: exact one-chunk file");
+    roundtrip_case(kem, pub, sec, 100000, "round-trip: multi-chunk file (streaming)");
 
     /* Tamper detection. */
     const char *plain = "/tmp/test_qsafe_plain.txt";
     const char *enc = "/tmp/test_qsafe_enc.bin";
     const char *dec = "/tmp/test_qsafe_dec.txt";
-    const char *data = "Hello, Qsafe 3.0! Post-quantum encryption integrity check.\n";
+    const char *data = "Hello, Qsafe 5.0! Hybrid post-quantum integrity check.\n";
     ASSERT(write_file(plain, (const unsigned char *)data, strlen(data)), "create tamper-test plaintext");
 
-    unsigned char aes_key[AES_KEY_SIZE];
     crypto_config_t config = {
         .verbose = 0, .force_overwrite = 1,
         .secret_key_file = DEFAULT_SECRET_KEY_FILE, .passphrase = "test-pass"
     };
+    const unsigned char *recips[1] = { pub };
 
-    crypto_error_t ret = crypto_encrypt_file(plain, enc, kem, aes_key, public_key, secret_key, &config);
+    size_t record_size = X25519_KEY_SIZE + kem->length_ciphertext +
+                         AES_GCM_NONCE_SIZE + QSAFE_CEK_SIZE + AES_GCM_TAG_SIZE;
+    long prefix = VERSION_HEADER_SIZE + 1 + AES_GCM_NONCE_SIZE;
+
+    crypto_error_t ret = crypto_encrypt_file(plain, enc, kem, recips, 1, &config);
     ASSERT(ret == CRYPTO_SUCCESS, "encrypt tamper-test file");
 
-    /* Flip a byte inside the AES ciphertext region (past header, nonce, KEM
-     * ciphertext, and the prepended metadata block). */
+    /* Flip a byte in the payload ciphertext (past the header, the single
+     * recipient record, and the prepended metadata block). */
     FILE *e = fopen(enc, "r+b");
     ASSERT(e != NULL, "open encrypted file for tampering");
     if (e) {
-        long off = (long)(VERSION_HEADER_SIZE + AES_GCM_NONCE_SIZE + kem->length_ciphertext + QSAFE_META_SIZE + 1);
+        long off = prefix + (long)record_size + QSAFE_META_SIZE + 1;
         unsigned char byte = 0;
         ASSERT(fseek(e, off, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read byte to tamper");
         byte ^= 0xFF;
         ASSERT(fseek(e, off, SEEK_SET) == 0 && fwrite(&byte, 1, 1, e) == 1, "write tampered byte");
         fclose(e);
 
-        ret = crypto_decrypt_file(enc, dec, kem, aes_key, public_key, secret_key, &config);
+        ret = crypto_decrypt_file(enc, dec, kem, sec, &config);
         ASSERT(ret == CRYPTO_ERR_INTEGRITY, "tampered ciphertext returns CRYPTO_ERR_INTEGRITY");
     }
 
-    /* A corrupt KEM ciphertext must also be rejected (it is authenticated as AAD). */
-    ret = crypto_encrypt_file(plain, enc, kem, aes_key, public_key, secret_key, &config);
-    ASSERT(ret == CRYPTO_SUCCESS, "re-encrypt for KEM-tamper test");
+    /* Corrupting a recipient record (inside the KEM ciphertext) yields a wrong
+     * key-encryption key, so the wrap no longer authenticates. */
+    ret = crypto_encrypt_file(plain, enc, kem, recips, 1, &config);
+    ASSERT(ret == CRYPTO_SUCCESS, "re-encrypt for record-tamper test");
     e = fopen(enc, "r+b");
     if (e) {
-        long koff = (long)(VERSION_HEADER_SIZE + AES_GCM_NONCE_SIZE);
+        long koff = prefix + X25519_KEY_SIZE + 4; /* inside the KEM ciphertext */
         unsigned char byte = 0;
-        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read KEM byte");
+        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fread(&byte, 1, 1, e) == 1, "read record byte");
         byte ^= 0xFF;
-        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fwrite(&byte, 1, 1, e) == 1, "tamper KEM byte");
+        ASSERT(fseek(e, koff, SEEK_SET) == 0 && fwrite(&byte, 1, 1, e) == 1, "tamper record byte");
         fclose(e);
-        ret = crypto_decrypt_file(enc, dec, kem, aes_key, public_key, secret_key, &config);
+        ret = crypto_decrypt_file(enc, dec, kem, sec, &config);
         ASSERT(ret == CRYPTO_ERR_INTEGRITY || ret == CRYPTO_ERR_CRYPTO,
-               "tampered KEM ciphertext is rejected");
+               "tampered recipient record is rejected");
     }
 
     remove(plain);
     remove(enc);
     remove(dec);
 
-    free(public_key);
-    free(secret_key);
+    free(pub);
+    free(sec);
     OQS_KEM_free(kem);
 }
 
@@ -317,14 +321,66 @@ static void test_error_codes(void) {
     ASSERT(CRYPTO_ERR_INTEGRITY == 5, "CRYPTO_ERR_INTEGRITY is 5");
 }
 
+/* Formats len bytes of buf as lowercase hex into out (>= 2*len+1). */
+static void to_hex(const unsigned char *buf, size_t len, char *out) {
+    static const char h[] = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[2 * i]     = h[buf[i] >> 4];
+        out[2 * i + 1] = h[buf[i] & 0x0f];
+    }
+    out[2 * len] = '\0';
+}
+
+/* Known-answer tests. The expected values were computed independently of
+ * Qsafe's own code: SHA-256/HKDF with Python's hashlib+hmac, and scrypt with
+ * the OpenSSL 3 `kdf` CLI. They pin the deterministic primitives so any future
+ * change that alters cryptographic output is caught immediately. */
+static void test_known_answer_vectors(void) {
+    printf("\n[test_known_answer_vectors]\n");
+    char hex[65];
+
+    /* (1) Public-key fingerprint: SHA-256 of 32 bytes of 0xAB. */
+    unsigned char ab32[32];
+    memset(ab32, 0xAB, sizeof(ab32));
+    unsigned char fpraw[32];
+    /* crypto_fingerprint emits hex directly; compare its string output. */
+    char fp[65];
+    ASSERT(crypto_fingerprint(ab32, sizeof(ab32), fp, sizeof(fp)) == CRYPTO_SUCCESS,
+           "fingerprint KAT computes");
+    (void)fpraw;
+    ASSERT(strcmp(fp, "9a2db2e23f1504cd056606553ac049c5e718e8f9ce9233876df1a7a1821af885") == 0,
+           "SHA-256 fingerprint matches known answer");
+
+    /* (2) HKDF-SHA256 (crypto_derive_aes_key) of 32 bytes of 0xAB,
+     *     info "qsafe-v3-aes-key", empty salt -> fixed 32-byte key. */
+    unsigned char aeskey[AES_KEY_SIZE];
+    ASSERT(crypto_derive_aes_key(ab32, sizeof(ab32), aeskey) == CRYPTO_SUCCESS,
+           "HKDF KAT computes");
+    to_hex(aeskey, sizeof(aeskey), hex);
+    ASSERT(strcmp(hex, "23007a6fb81fbb59d3d85ec00e26c634a8d9aaf77d6b0ba78da66394a875a62a") == 0,
+           "HKDF-SHA256 derived key matches known answer");
+
+    /* (3) scrypt (crypto_derive_key_from_passphrase) pass="hunter2",
+     *     salt = 16 bytes of 0x11, N=2^15, r=8, p=1 -> fixed 32-byte key. */
+    unsigned char salt[KDF_SALT_SIZE];
+    memset(salt, 0x11, sizeof(salt));
+    unsigned char sckey[AES_KEY_SIZE];
+    ASSERT(crypto_derive_key_from_passphrase("hunter2", salt, 1ULL << 15, 8, 1, sckey) == CRYPTO_SUCCESS,
+           "scrypt KAT computes");
+    to_hex(sckey, sizeof(sckey), hex);
+    ASSERT(strcmp(hex, "3eeeb21df68c7b1087858f538b51ef7b17ae239aad10e867ef959116c3fcf8d9") == 0,
+           "scrypt derived key matches known answer");
+}
+
 int main(void) {
-    printf("=== Qsafe 3.0 Unit Tests ===\n");
+    printf("=== Qsafe 5.0 Unit Tests ===\n");
 
     test_derive_aes_key();
     test_derive_key_from_passphrase();
     test_save_load_secret_key();
     test_save_load_public_key();
     test_encrypt_decrypt_file();
+    test_known_answer_vectors();
     test_error_codes();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
