@@ -83,4 +83,38 @@ static inline int qsafe_realpath(const char *path, char *resolved) {
 #endif
 }
 
+/* Returns the user's home directory (HOME on POSIX, USERPROFILE on Windows),
+ * or NULL if unset. */
+static inline const char *qsafe_home_dir(void) {
+#ifdef _WIN32
+    const char *h = getenv("USERPROFILE");
+#else
+    const char *h = getenv("HOME");
+#endif
+    return (h && *h) ? h : NULL;
+}
+
+/* Creates `path` and any missing parent directories (like `mkdir -p`). Returns
+ * 0 on success (or if it already exists), -1 on error. */
+static inline int qsafe_mkdir_p(const char *path) {
+    char tmp[PATH_MAX];
+    size_t len = 0;
+    for (const char *p = path; *p && len + 1 < sizeof(tmp); p++, len++) tmp[len] = *p;
+    tmp[len] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char sep = *p;
+            *p = '\0';
+            if (tmp[0]) {
+                struct stat st;
+                if (qsafe_mkdir(tmp) != 0 && stat(tmp, &st) != 0) return -1;
+            }
+            *p = sep;
+        }
+    }
+    struct stat st;
+    if (qsafe_mkdir(tmp) != 0 && stat(tmp, &st) != 0) return -1;
+    return 0;
+}
+
 #endif /* QSAFE_PLATFORM_H */

@@ -22,3 +22,6 @@ secret_key.bin
 
 # Claude Code
 .claude/
+
+# keyring test scratch
+qsafe_keyring_test_*/
