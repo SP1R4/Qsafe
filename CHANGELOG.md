@@ -7,6 +7,10 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`libqsafe` + Python bindings**: a stable C library API (`include/libqsafe.h`,
+  `make lib` → `libqsafe.{so,dylib,dll}`) around the engine, and a `ctypes`
+  Python module (`python/qsafe.py`) with file and byte-buffer helpers
+  (`encrypt_bytes`/`decrypt_bytes`). New CI job runs the Python tests.
 - **Windows support** (MSYS2 / MinGW-w64): a platform shim (`include/platform.h`)
   for binary stdio, no-echo console input, temp files, `mkdir`, `realpath`,
   `chmod`, and `utime`; Makefile auto-detects MinGW and builds `qsafe.exe`; a

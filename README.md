@@ -375,6 +375,30 @@ qsafe --key-file project.key decrypt data.csv.qsafe
 
 ---
 
+## Library & Python bindings
+
+Qsafe is also a library, so you can embed it instead of shelling out.
+
+```bash
+make lib        # -> libqsafe.so / libqsafe.dylib / libqsafe.dll
+```
+
+The C API is in [`include/libqsafe.h`](include/libqsafe.h) (`qsafe_keygen`,
+`qsafe_encrypt`, `qsafe_decrypt`, `qsafe_sign`, `qsafe_verify_signature`, …).
+The Python module wraps it with file and byte-buffer helpers:
+
+```python
+import qsafe   # python/qsafe.py; set QSAFE_LIB if the library isn't alongside it
+
+qsafe.keygen("sk.bin", "pk.bin", "passphrase")
+blob = qsafe.encrypt_bytes(b"secret", ["pk.bin"])      # bytes in, bytes out
+assert qsafe.decrypt_bytes(blob, "sk.bin", "passphrase") == b"secret"
+```
+
+Errors raise `qsafe.QsafeError`. See `python/test_qsafe.py` for the full surface.
+
+---
+
 ## File Formats
 
 > The complete byte-level specification — every field, the key-wrap and AEAD

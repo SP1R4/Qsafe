@@ -22,3 +22,9 @@ secret_key.bin
 
 # Claude Code
 .claude/
+
+# shared library + python cache
+libqsafe.so
+libqsafe.dylib
+libqsafe.dll
+__pycache__/
