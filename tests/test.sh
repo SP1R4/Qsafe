@@ -448,6 +448,33 @@ else
     pass "real-age cross-check skipped (age not installed)"
 fi
 
+# --- Test 21: macOS Keychain-backed passphrase ---
+echo ""
+echo "[test: keychain]"
+case "$(uname -s)" in
+  Darwin)
+    KCKEY="$TMPDIR/kc_key.bin"
+    security delete-generic-password -s qsafe -a "$KCKEY" >/dev/null 2>&1
+    # --keychain takes precedence over $QSAFE_PASSPHRASE: keygen generates and
+    # stores a random passphrase; decrypt retrieves it.
+    "$BINARY" keygen --keychain --key-file "$KCKEY" >/dev/null 2>&1
+    check_ok "keygen --keychain stores a passphrase" \
+        security find-generic-password -s qsafe -a "$KCKEY"
+    echo "keychain-protected secret" > "$TMPDIR/kc_pt.txt"
+    "$BINARY" encrypt --key-file "$KCKEY" "$TMPDIR/kc_pt.txt" "$TMPDIR/kc.q" >/dev/null 2>&1
+    check_ok "decrypt --keychain round-trips" \
+        "$BINARY" decrypt --keychain --key-file "$KCKEY" "$TMPDIR/kc.q" "$TMPDIR/kc.out"
+    check_ok "keychain round-trip matches" \
+        diff -q "$TMPDIR/kc_pt.txt" "$TMPDIR/kc.out"
+    security delete-generic-password -s qsafe -a "$KCKEY" >/dev/null 2>&1
+    check_fail "decrypt --keychain fails after the item is removed" \
+        "$BINARY" decrypt --keychain --key-file "$KCKEY" "$TMPDIR/kc.q" "$TMPDIR/kc.bad"
+    ;;
+  *)
+    pass "keychain test skipped (macOS only)"
+    ;;
+esac
+
 # --- Results ---
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed ==="

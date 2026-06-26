@@ -17,6 +17,9 @@
 #include "platform.h"
 #include "crypto_utils.h"
 #include "age.h"
+#include "keychain.h"
+
+#define KEYCHAIN_SERVICE "qsafe"
 
 #define PROGRAM_NAME "qsafe"
 #define VERSION "6.0.0"
@@ -69,6 +72,7 @@ static void print_usage(void) {
     printf("  --check                 decrypt/verify: authenticate only, write nothing\n");
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
+    printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS)\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
     printf("  --help                  Display this help message\n");
@@ -151,6 +155,49 @@ static int read_hidden(const char *prompt, char *buf, size_t bufsz) {
 static crypto_error_t resolve_passphrase(crypto_config_t *config, const char *cli,
                                          const char *pfile, int confirm,
                                          char *buf, size_t bufsz) {
+    /* --keychain: the wrapping passphrase lives in the OS keychain. On a
+     * key-creating op (confirm=1) generate a strong random one and store it;
+     * otherwise retrieve it. The keychain item is keyed by the secret-key path. */
+    if (config->use_keychain) {
+        if (!keychain_available()) {
+            fprintf(stderr, "Error: --keychain is not supported on this platform\n");
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+        const char *account = config->secret_key_file;
+        if (confirm) {
+            unsigned char rnd[24];
+            if (RAND_bytes(rnd, sizeof(rnd)) != 1) {
+                fprintf(stderr, "Error: could not generate a keychain passphrase\n");
+                return CRYPTO_ERR_CRYPTO;
+            }
+            static const char hex[] = "0123456789abcdef";
+            if (bufsz < sizeof(rnd) * 2 + 1) return CRYPTO_ERR_INVALID_INPUT;
+            for (size_t i = 0; i < sizeof(rnd); i++) {
+                buf[2 * i] = hex[rnd[i] >> 4];
+                buf[2 * i + 1] = hex[rnd[i] & 0xF];
+            }
+            buf[sizeof(rnd) * 2] = '\0';
+            OPENSSL_cleanse(rnd, sizeof(rnd));
+            if (keychain_store(KEYCHAIN_SERVICE, account, buf) != KC_OK) {
+                fprintf(stderr, "Error: could not store passphrase in the keychain\n");
+                return CRYPTO_ERR_FILE_IO;
+            }
+            config->passphrase = buf;
+            return CRYPTO_SUCCESS;
+        }
+        kc_status kc = keychain_retrieve(KEYCHAIN_SERVICE, account, buf, bufsz);
+        if (kc == KC_ERR_NOTFOUND) {
+            fprintf(stderr, "Error: no keychain entry for '%s'\n", account);
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+        if (kc != KC_OK) {
+            fprintf(stderr, "Error: could not read the keychain\n");
+            return CRYPTO_ERR_FILE_IO;
+        }
+        config->passphrase = buf;
+        return CRYPTO_SUCCESS;
+    }
+
     if (cli) {
         config->passphrase = cli;
         return CRYPTO_SUCCESS;
@@ -403,6 +450,7 @@ int main(int argc, char *argv[]) {
     config.secret_key_file = DEFAULT_SECRET_KEY_FILE;
     config.public_key_file = NULL;
     config.passphrase = NULL;
+    config.use_keychain = 0;
 
     const char *command = NULL;
     const char *cli_passphrase = NULL;
@@ -432,6 +480,8 @@ int main(int argc, char *argv[]) {
             config.force_overwrite = 1;
         } else if (strcmp(a, "--check") == 0) {
             config.check_only = 1;
+        } else if (strcmp(a, "--keychain") == 0) {
+            config.use_keychain = 1;
         } else if (strcmp(a, "--armor") == 0) {
             config.armor = 1;
         } else if (strcmp(a, "--key-file") == 0) {

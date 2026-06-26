@@ -22,6 +22,8 @@ ifeq ($(UNAME_S),Darwin)
     LIBOQS_PREFIX  ?= /usr/local
     CPPFLAGS += -I$(OPENSSL_PREFIX)/include -I$(LIBOQS_PREFIX)/include
     LDFLAGS  += -L$(OPENSSL_PREFIX)/lib -L$(LIBOQS_PREFIX)/lib
+    # macOS Keychain backing (src/keychain.c) uses the Security framework.
+    LDLIBS   += -framework Security -framework CoreFoundation
 else ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
     # Windows via MSYS2/MinGW-w64. openssl + liboqs from the mingw prefix are on
     # the default search path; set LIBOQS_PREFIX/OPENSSL_PREFIX to override.
@@ -59,7 +61,7 @@ LIBRARY = libqsafe$(LIBEXT)
 SRC_DIR = src
 TEST_DIR = tests
 
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = qsafe$(EXEEXT)
 

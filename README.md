@@ -417,6 +417,25 @@ qsafe age-decrypt -i key.txt   report.pdf.age report.pdf
 
 ---
 
+## Hardware / OS-backed keys (`--keychain`)
+
+The passphrase that wraps your secret key can live in the **OS keychain** instead
+of in your head. On macOS this is the Keychain (Secure-Enclave-protected on
+supported hardware), so the passphrase is never typed or stored in the clear:
+
+```bash
+qsafe keygen  --keychain               # generates a random passphrase, stores it
+qsafe decrypt --keychain report.q out  # retrieves it automatically — no prompt
+```
+
+The keychain item is keyed by the secret-key file path (service `qsafe`). On
+non-macOS platforms `--keychain` reports that it is unsupported; Linux
+(libsecret) and Windows (DPAPI / Credential Manager) backends are planned. The
+on-disk secret key remains scrypt-wrapped either way — `--keychain` only changes
+*where the wrapping passphrase comes from*.
+
+---
+
 ## File Formats
 
 > The complete byte-level specification — every field, the key-wrap and AEAD
