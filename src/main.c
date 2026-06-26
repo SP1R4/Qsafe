@@ -16,6 +16,7 @@
 #include <openssl/crypto.h>
 #include "platform.h"
 #include "crypto_utils.h"
+#include "age.h"
 
 #define PROGRAM_NAME "qsafe"
 #define VERSION "6.0.0"
@@ -35,6 +36,9 @@ static void print_usage(void) {
     printf("  %s sign    [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s verify-sig [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s keys    <list|path|import <name> <pubkey>|remove <name>>\n", PROGRAM_NAME);
+    printf("  %s age-keygen [keyfile]\n", PROGRAM_NAME);
+    printf("  %s age-encrypt -r <age1...> <input> [output]\n", PROGRAM_NAME);
+    printf("  %s age-decrypt -i <keyfile> <input> [output]\n", PROGRAM_NAME);
     printf("\n");
     printf("Commands:\n");
     printf("  keygen       Generate a hybrid X25519 + ML-KEM-1024 keypair (run once)\n");
@@ -47,6 +51,9 @@ static void print_usage(void) {
     printf("  sign         Create a detached signature for a file\n");
     printf("  verify-sig   Verify a detached signature against a file\n");
     printf("  keys         Manage the keyring (~/.qsafe): list/import/remove recipients\n");
+    printf("  age-keygen   Generate an age (X25519) keypair\n");
+    printf("  age-encrypt  Encrypt to age 'age1...' recipients (interop; classical only)\n");
+    printf("  age-decrypt  Decrypt an age file with an age identity file (-i)\n");
     printf("\n");
     printf("Files vs. directories are detected automatically. Use '-' as the input\n");
     printf("or output to read from stdin / write to stdout.\n");
@@ -56,6 +63,7 @@ static void print_usage(void) {
     printf("  --pub-file <path>       Public key file (default: <key-file>%s)\n", PUBLIC_KEY_SUFFIX);
     printf("  -r, --recipient <p|name> encrypt: recipient public key path OR keyring name (repeatable)\n");
     printf("  --identity <name>       use (or, for keygen, create) a keyring identity in ~/.qsafe\n");
+    printf("  -i, --identity-file <p> age-decrypt: age identity file (AGE-SECRET-KEY-...)\n");
     printf("  --passphrase <str>      Passphrase (discouraged; visible to other users)\n");
     printf("  --passphrase-file <p>   Read the passphrase from the first line of a file\n");
     printf("  --check                 decrypt/verify: authenticate only, write nothing\n");
@@ -312,6 +320,68 @@ static int resolve_recipient_path(const char *arg, char *buf, size_t n) {
     return 0;
 }
 
+/* ------------------------------- age interop -----------------------------
+ * Self-contained age v1 (X25519) commands. Recipients are "age1…" strings
+ * (passed via -r); the decrypt identity is an "AGE-SECRET-KEY-1…" file (-i). */
+static int run_age_command(const char *command, const char *const *positionals, int npos,
+                           const char *const *recipients, int n_recipients,
+                           const char *identity_file) {
+    if (strcmp(command, "age-keygen") == 0) {
+        char pub[200], sec[200];
+        if (age_keygen(pub, sizeof(pub), sec, sizeof(sec)) != AGE_OK) {
+            fprintf(stderr, "Error: age keypair generation failed\n");
+            return 1;
+        }
+        const char *out = npos >= 1 ? positionals[0] : NULL;
+        FILE *f = out ? fopen(out, "w") : stdout;
+        if (!f) {
+            fprintf(stderr, "Error: cannot write '%s'\n", out);
+            OPENSSL_cleanse(sec, sizeof(sec));
+            return 1;
+        }
+        fprintf(f, "# public key: %s\n%s\n", pub, sec);
+        if (out) {
+            fclose(f);
+            qsafe_chmod_private(out);
+            fprintf(stderr, "Public key: %s\n", pub);
+        }
+        OPENSSL_cleanse(sec, sizeof(sec));
+        return 0;
+    }
+    if (strcmp(command, "age-encrypt") == 0) {
+        if (n_recipients == 0) {
+            fprintf(stderr, "Error: age-encrypt needs at least one '-r age1...'\n");
+            return 1;
+        }
+        if (npos < 1) { fprintf(stderr, "Error: age-encrypt [-r age1...] <input> [output]\n"); return 1; }
+        const char *out = npos >= 2 ? positionals[1] : "-";
+        age_status rc = age_encrypt_file(positionals[0], out, recipients, (size_t)n_recipients);
+        if (rc != AGE_OK) { fprintf(stderr, "Error: age-encrypt: %s\n", age_strerror(rc)); return 1; }
+        return 0;
+    }
+    /* age-decrypt */
+    if (!identity_file) { fprintf(stderr, "Error: age-decrypt requires -i <identity-file>\n"); return 1; }
+    if (npos < 1) { fprintf(stderr, "Error: age-decrypt -i <key> <input> [output]\n"); return 1; }
+    char line[256], secret[256] = "";
+    FILE *kf = fopen(identity_file, "r");
+    if (!kf) { fprintf(stderr, "Error: cannot open identity file '%s'\n", identity_file); return 1; }
+    while (fgets(line, sizeof(line), kf)) {
+        if (strncmp(line, "AGE-SECRET-KEY-", 15) == 0) {
+            size_t l = strlen(line);
+            while (l && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = '\0';
+            snprintf(secret, sizeof(secret), "%s", line);
+            break;
+        }
+    }
+    fclose(kf);
+    if (!secret[0]) { fprintf(stderr, "Error: no AGE-SECRET-KEY in '%s'\n", identity_file); return 1; }
+    const char *out = npos >= 2 ? positionals[1] : "-";
+    age_status rc = age_decrypt_file(positionals[0], out, secret);
+    OPENSSL_cleanse(secret, sizeof(secret));
+    if (rc != AGE_OK) { fprintf(stderr, "Error: age-decrypt: %s\n", age_strerror(rc)); return 1; }
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
      * by CRLF translation. No-op on POSIX. */
@@ -339,6 +409,7 @@ int main(int argc, char *argv[]) {
     const char *passphrase_file = NULL;
     const char *pub_file_opt = NULL;
     const char *identity_name = NULL;
+    const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
     const char *positionals[3] = { NULL, NULL, NULL };
     int npos = 0;
     int key_file_set = 0;
@@ -377,6 +448,9 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(a, "--identity") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --identity requires a name\n"); return 1; }
             identity_name = argv[i];
+        } else if (strcmp(a, "--identity-file") == 0 || strcmp(a, "-i") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --identity-file requires a path\n"); return 1; }
+            identity_file = argv[i];
         } else if (strcmp(a, "--pub-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --pub-file requires a path\n"); return 1; }
             pub_file_opt = argv[i];
@@ -428,11 +502,22 @@ int main(int argc, char *argv[]) {
     int is_sign = strcmp(command, "sign") == 0;
     int is_verify_sig = strcmp(command, "verify-sig") == 0;
     int is_keys = strcmp(command, "keys") == 0;
+    int is_age_keygen = strcmp(command, "age-keygen") == 0;
+    int is_age_encrypt = strcmp(command, "age-encrypt") == 0;
+    int is_age_decrypt = strcmp(command, "age-decrypt") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
-        !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys) {
+        !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys &&
+        !is_age_keygen && !is_age_encrypt && !is_age_decrypt) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
         return 1;
+    }
+
+    /* age interop is a self-contained format (classical X25519, no liboqs) —
+     * handle it before the hybrid engine sets up. */
+    if (is_age_keygen || is_age_encrypt || is_age_decrypt) {
+        return run_age_command(command, positionals, npos,
+                               recipient_opts, n_recipient_opts, identity_file);
     }
 
     /* verify is decrypt that authenticates but writes nothing. */

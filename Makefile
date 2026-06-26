@@ -59,7 +59,7 @@ LIBRARY = libqsafe$(LIBEXT)
 SRC_DIR = src
 TEST_DIR = tests
 
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = qsafe$(EXEEXT)
 

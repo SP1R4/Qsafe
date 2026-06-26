@@ -420,6 +420,34 @@ check_fail "encrypt to unknown name is rejected" \
 unset QSAFE_HOME
 rm -rf "$QSAFE_HOME_DIR"
 
+# --- Test 20: age interop (X25519) ---
+echo ""
+echo "[test: age interop]"
+"$BINARY" age-keygen "$TMPDIR/agekey.txt" >/dev/null 2>&1
+APUB=$(grep -o 'age1[a-z0-9]*' "$TMPDIR/agekey.txt" | head -1)
+echo "age interop round-trip plaintext" > "$TMPDIR/age_pt.txt"
+check_ok "age-encrypt to a recipient" \
+    "$BINARY" age-encrypt -r "$APUB" "$TMPDIR/age_pt.txt" "$TMPDIR/age_ct.age"
+check_ok "age-decrypt round-trips" \
+    "$BINARY" age-decrypt -i "$TMPDIR/agekey.txt" "$TMPDIR/age_ct.age" "$TMPDIR/age_out.txt"
+check_ok "age round-trip matches" \
+    diff -q "$TMPDIR/age_pt.txt" "$TMPDIR/age_out.txt"
+check_fail "age-decrypt with wrong identity is rejected" \
+    sh -c '"$1" age-keygen "$2" >/dev/null 2>&1; "$1" age-decrypt -i "$2" "$3" "$4"' \
+    _ "$BINARY" "$TMPDIR/agekey2.txt" "$TMPDIR/age_ct.age" "$TMPDIR/age_bad.txt"
+# Cross-validate against the real `age` binary when it is installed.
+if command -v age >/dev/null 2>&1; then
+    age -d -i "$TMPDIR/agekey.txt" -o "$TMPDIR/age_real.txt" "$TMPDIR/age_ct.age" >/dev/null 2>&1
+    check_ok "real age decrypts qsafe output" \
+        diff -q "$TMPDIR/age_pt.txt" "$TMPDIR/age_real.txt"
+    age -r "$APUB" -o "$TMPDIR/age_from_real.age" "$TMPDIR/age_pt.txt" >/dev/null 2>&1
+    "$BINARY" age-decrypt -i "$TMPDIR/agekey.txt" "$TMPDIR/age_from_real.age" "$TMPDIR/age_from_real.txt" >/dev/null 2>&1
+    check_ok "qsafe decrypts real age output" \
+        diff -q "$TMPDIR/age_pt.txt" "$TMPDIR/age_from_real.txt"
+else
+    pass "real-age cross-check skipped (age not installed)"
+fi
+
 # --- Results ---
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed ==="
