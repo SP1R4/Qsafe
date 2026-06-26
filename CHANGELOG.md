@@ -14,6 +14,11 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CodeQL static analysis workflow (results in the repo Security tab).
 - Continuous-fuzzing workflow: daily + on parser changes, with a corpus
   persisted across runs and crash inputs uploaded as artifacts.
+- **Windows release binaries**: the release workflow now also builds, tests,
+  signs, and attaches a self-contained Windows `x86_64` archive (with the MinGW
+  runtime DLLs); `workflow_dispatch` allows validating the pipeline without a tag.
+- `docs/REVIEW.md`: a reviewer's guide (code map + assumptions to attack) to
+  enable an independent security review; concrete reporting channel in SECURITY.md.
 
 ## [6.0.0] - 2026-06-25
 

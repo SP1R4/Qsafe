@@ -7,6 +7,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:   # manual runs build + sign artifacts (no release attach)
 
 permissions:
   contents: write
@@ -85,6 +86,83 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qsafe-${{ runner.os }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.cosign.bundle
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.cosign.bundle
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW-w64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git make diffutils coreutils grep
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Build & install liboqs
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX=/mingw64
+          cmake --build liboqs/build
+          cmake --install liboqs/build
+
+      - name: Build
+        run: make
+
+      - name: Run tests
+        run: make test
+
+      - name: Package
+        run: |
+          NAME="qsafe-${GITHUB_REF_NAME}-Windows-x86_64"
+          mkdir -p "dist/$NAME"
+          cp qsafe.exe README.md LICENSE CHANGELOG.md "dist/$NAME/"
+          cp docs/qsafe.1 "dist/$NAME/" || true
+          # Bundle the MinGW runtime DLLs so the archive runs without MSYS2.
+          ldd qsafe.exe | grep -i '/mingw64/' | awk '{print $3}' | sort -u | while read -r dll; do
+            [ -f "$dll" ] && cp "$dll" "dist/$NAME/"
+          done
+          tar -C dist -czf "$NAME.tar.gz" "$NAME"
+          sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifact (keyless)
+        run: |
+          for f in *.tar.gz; do
+            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+          done
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qsafe-Windows
           path: |
             *.tar.gz
             *.tar.gz.sha256
