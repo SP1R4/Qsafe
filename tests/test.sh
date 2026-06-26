@@ -386,7 +386,11 @@ check_ok "decrypts a QSAFE005 file produced by v5.0.0" \
 # --- Test 19: keyring / named identities ---
 echo ""
 echo "[test: keyring]"
-export QSAFE_HOME="$TMPDIR/kr"
+# Env vars are not MSYS path-translated, so on Windows a native binary cannot use
+# an MSYS "/tmp/..." path. Use a CWD-relative keyring dir (works everywhere).
+QSAFE_HOME_DIR="qsafe_keyring_test_$$"
+rm -rf "$QSAFE_HOME_DIR"
+export QSAFE_HOME="$QSAFE_HOME_DIR"
 check_ok "keygen --identity alice" "$BINARY" keygen --identity alice
 check_ok "keygen --identity bob"   "$BINARY" keygen --identity bob
 "$BINARY" keys list 2>/dev/null | grep -q "alice" \
@@ -414,6 +418,7 @@ check_ok "keys remove recipient" "$BINARY" keys remove friend
 check_fail "encrypt to unknown name is rejected" \
     "$BINARY" encrypt -r nobody "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_x.q"
 unset QSAFE_HOME
+rm -rf "$QSAFE_HOME_DIR"
 
 # --- Results ---
 echo ""
