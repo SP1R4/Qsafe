@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-7.0.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/NIST-FIPS%20203-orange" alt="NIST FIPS 203">
   <img src="https://img.shields.io/badge/language-C-lightgrey" alt="C">
@@ -251,14 +251,14 @@ pre-shared key. To verify a downloaded artifact:
 
 ```bash
 # Checksum
-shasum -a 256 -c qsafe-v6.0.0-Linux-x86_64.tar.gz.sha256
+shasum -a 256 -c qsafe-v7.0.0-Linux-x86_64.tar.gz.sha256
 
 # Signature
 cosign verify-blob \
-  --bundle qsafe-v6.0.0-Linux-x86_64.tar.gz.cosign.bundle \
+  --bundle qsafe-v7.0.0-Linux-x86_64.tar.gz.cosign.bundle \
   --certificate-identity-regexp "https://github.com/SP1R4/Qsafe/.github/workflows/release.yml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  qsafe-v6.0.0-Linux-x86_64.tar.gz
+  qsafe-v7.0.0-Linux-x86_64.tar.gz
 ```
 
 ### Verify Installation

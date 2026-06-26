@@ -6,6 +6,12 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-06-26
+
+A feature release. **No on-disk format change** — `encrypt` still writes
+QSAFE006 and decrypt reads QSAFE006/005, so v6 files and keypairs keep working.
+Everything below is additive.
+
 ### Added
 - **OS keychain-backed passphrase** (`--keychain`): the secret-key passphrase can
   be generated and stored in the OS keychain instead of typed. macOS uses the
@@ -96,7 +102,8 @@ files with a 4.x build first).
 - Switched to ML-KEM-1024; scrypt-wrapped secret keys; streaming decryption;
   CI and expanded tests.
 
-[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v6.0.0...HEAD
+[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v7.0.0...HEAD
+[7.0.0]: https://github.com/SP1R4/Qsafe/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...v6.0.0
 [5.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v5.0.0
 [4.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v4.0.0
