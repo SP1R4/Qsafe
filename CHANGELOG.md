@@ -7,6 +7,10 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OS keychain-backed passphrase** (`--keychain`): the secret-key passphrase can
+  be generated and stored in the OS keychain instead of typed. macOS uses the
+  Keychain via the Security framework (Secure-Enclave-protected on supported
+  hardware); Linux (libsecret) and Windows (DPAPI) are documented stubs for now.
 - **age interop** (`age-keygen` / `age-encrypt` / `age-decrypt`): read and write
   [age](https://age-encryption.org) v1 files for X25519 recipients, byte-compatible
   with the `age` tool (validated both directions in CI). Note: age is a *classical*

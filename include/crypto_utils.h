@@ -106,6 +106,7 @@ typedef struct {
     const char *secret_key_file;
     const char *public_key_file;
     const char *passphrase;
+    int use_keychain;          /* derive/store the key passphrase in the OS keychain */
 } crypto_config_t;
 
 void crypto_handle_errors(void);
