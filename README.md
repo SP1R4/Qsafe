@@ -399,6 +399,24 @@ Errors raise `qsafe.QsafeError`. See `python/test_qsafe.py` for the full surface
 
 ---
 
+## age interoperability
+
+Qsafe can read and write [age](https://age-encryption.org) v1 files for X25519
+recipients, so it interoperates with the `age` tool and other v1 implementations:
+
+```bash
+qsafe age-keygen key.txt                       # age1… / AGE-SECRET-KEY-1…
+qsafe age-encrypt -r age1q...  report.pdf report.pdf.age
+qsafe age-decrypt -i key.txt   report.pdf.age report.pdf
+# …and the files round-trip with the real `age` binary, both directions.
+```
+
+> **No post-quantum protection here.** age v1 is a *classical* X25519 format.
+> These commands exist for ecosystem compatibility; for quantum-resistant
+> encryption use Qsafe's native `encrypt`/`decrypt` (X25519 + ML-KEM-1024).
+
+---
+
 ## File Formats
 
 > The complete byte-level specification — every field, the key-wrap and AEAD

@@ -7,6 +7,11 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **age interop** (`age-keygen` / `age-encrypt` / `age-decrypt`): read and write
+  [age](https://age-encryption.org) v1 files for X25519 recipients, byte-compatible
+  with the `age` tool (validated both directions in CI). Note: age is a *classical*
+  X25519 format with no post-quantum protection — this is for ecosystem
+  compatibility, not PQ security.
 - **`libqsafe` + Python bindings**: a stable C library API (`include/libqsafe.h`,
   `make lib` → `libqsafe.{so,dylib,dll}`) around the engine, and a `ctypes`
   Python module (`python/qsafe.py`) with file and byte-buffer helpers
