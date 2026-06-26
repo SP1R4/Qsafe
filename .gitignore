@@ -23,5 +23,11 @@ secret_key.bin
 # Claude Code
 .claude/
 
+# shared library + python cache
+libqsafe.so
+libqsafe.dylib
+libqsafe.dll
+__pycache__/
+
 # keyring test scratch
 qsafe_keyring_test_*/

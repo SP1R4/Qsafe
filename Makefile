@@ -46,6 +46,16 @@ ifdef WINDOWS
     LDLIBS += -lws2_32 -lcrypt32 -lbcrypt
 endif
 
+# Shared-library suffix per platform.
+ifeq ($(UNAME_S),Darwin)
+    LIBEXT = .dylib
+else ifdef WINDOWS
+    LIBEXT = .dll
+else
+    LIBEXT = .so
+endif
+LIBRARY = libqsafe$(LIBEXT)
+
 SRC_DIR = src
 TEST_DIR = tests
 
@@ -75,6 +85,14 @@ test: $(EXECUTABLE) $(TEST_EXECUTABLE)
 
 $(TEST_EXECUTABLE): $(TEST_OBJECTS)
 	$(CC) $(EXTRA_CFLAGS) $(TEST_OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+# --- Shared library (libqsafe) ------------------------------------------------
+# A stable C API around the engine; used by the language bindings (python/).
+lib: $(LIBRARY)
+
+$(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -fPIC -shared $^ -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 # --- Fuzzing (requires clang + libFuzzer) -------------------------------------
 # Builds an instrumented harness over the untrusted-input parsers. Run with:
@@ -114,6 +132,6 @@ uninstall:
 	rm -f $(DESTDIR)$(ZSHCOMPDIR)/_qsafe
 
 clean:
-	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE)
+	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY)
 
-.PHONY: all test fuzz install install-completions uninstall clean
+.PHONY: all test lib fuzz install install-completions uninstall clean
