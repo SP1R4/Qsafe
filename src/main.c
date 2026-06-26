@@ -630,7 +630,9 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(sub, "list") == 0) {
             char dir[MAX_PATH_LENGTH];
-            snprintf(dir, sizeof(dir), "%s/identities", base);
+            if (snprintf(dir, sizeof(dir), "%s/identities", base) >= (int)sizeof(dir)) {
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
             printf("Identities:\n");
             DIR *d = opendir(dir);
             if (d) {
@@ -638,7 +640,8 @@ int main(int argc, char *argv[]) {
                 while ((e = readdir(d)) != NULL) {
                     if (e->d_name[0] == '.') continue;
                     char pubp[MAX_PATH_LENGTH], fp[65] = "";
-                    snprintf(pubp, sizeof(pubp), "%s/%s/public_key.bin", dir, e->d_name);
+                    if (snprintf(pubp, sizeof(pubp), "%s/%s/public_key.bin", dir, e->d_name) >= (int)sizeof(pubp))
+                        continue;
                     if (file_exists(pubp)) {
                         unsigned char *pk = crypto_load_public_key(pubp, explen, &config);
                         if (pk) { crypto_fingerprint(pk, explen, fp, sizeof(fp)); free(pk); }
@@ -647,7 +650,9 @@ int main(int argc, char *argv[]) {
                 }
                 closedir(d);
             }
-            snprintf(dir, sizeof(dir), "%s/recipients", base);
+            if (snprintf(dir, sizeof(dir), "%s/recipients", base) >= (int)sizeof(dir)) {
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
             printf("Recipients:\n");
             d = opendir(dir);
             if (d) {
@@ -656,7 +661,8 @@ int main(int argc, char *argv[]) {
                     size_t L = strlen(e->d_name);
                     if (e->d_name[0] == '.' || L < 4 || strcmp(e->d_name + L - 4, ".pub") != 0) continue;
                     char pubp[MAX_PATH_LENGTH], fp[65] = "", name[256];
-                    snprintf(pubp, sizeof(pubp), "%s/%s", dir, e->d_name);
+                    if (snprintf(pubp, sizeof(pubp), "%s/%s", dir, e->d_name) >= (int)sizeof(pubp))
+                        continue;
                     snprintf(name, sizeof(name), "%.*s", (int)(L - 4), e->d_name);
                     unsigned char *pk = crypto_load_public_key(pubp, explen, &config);
                     if (pk) { crypto_fingerprint(pk, explen, fp, sizeof(fp)); free(pk); }
@@ -682,12 +688,15 @@ int main(int argc, char *argv[]) {
                 ret = CRYPTO_ERR_FILE_IO; goto cleanup;
             }
             char rdir[MAX_PATH_LENGTH], dest[MAX_PATH_LENGTH];
-            snprintf(rdir, sizeof(rdir), "%s/recipients", base);
+            if (snprintf(rdir, sizeof(rdir), "%s/recipients", base) >= (int)sizeof(rdir) ||
+                snprintf(dest, sizeof(dest), "%s/recipients/%s.pub", base, name) >= (int)sizeof(dest)) {
+                fprintf(stderr, "Error: keyring path too long\n");
+                free(pk); ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
             if (qsafe_mkdir_p(rdir) != 0) {
                 fprintf(stderr, "Error: cannot create %s\n", rdir);
                 free(pk); ret = CRYPTO_ERR_FILE_IO; goto cleanup;
             }
-            snprintf(dest, sizeof(dest), "%s/%s.pub", rdir, name);
             ret = crypto_save_public_key(dest, pk, explen, &config);
             free(pk);
             if (ret == CRYPTO_SUCCESS) printf("Imported recipient '%s'\n", name);
@@ -700,7 +709,9 @@ int main(int argc, char *argv[]) {
                 ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
             }
             char dest[MAX_PATH_LENGTH];
-            snprintf(dest, sizeof(dest), "%s/recipients/%s.pub", base, name);
+            if (snprintf(dest, sizeof(dest), "%s/recipients/%s.pub", base, name) >= (int)sizeof(dest)) {
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
             if (remove(dest) != 0) {
                 fprintf(stderr, "Error: no such recipient '%s'\n", name);
                 ret = CRYPTO_ERR_FILE_IO; goto cleanup;
