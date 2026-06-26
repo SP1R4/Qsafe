@@ -370,7 +370,11 @@ check_fail "truncated framed file is rejected" \
     "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/multi.trunc.q"
 # Tampering a frame byte must be detected.
 cp "$TMPDIR/multi.q" "$TMPDIR/multi.bad.q"
-printf 'X' | dd of="$TMPDIR/multi.bad.q" bs=1 seek=2000 count=1 conv=notrunc 2>/dev/null
+# Flip a byte to its complement so the corruption is guaranteed to differ from
+# the original (writing a fixed byte is a no-op ~1/256 of the time -> flaky).
+orig=$(dd if="$TMPDIR/multi.bad.q" bs=1 skip=2000 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+new=$(( orig ^ 255 ))
+printf "$(printf '\\%03o' "$new")" | dd of="$TMPDIR/multi.bad.q" bs=1 seek=2000 count=1 conv=notrunc 2>/dev/null
 check_fail "tampered framed file is rejected" \
     "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/multi.bad.q"
 
