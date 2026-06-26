@@ -25,14 +25,18 @@ Security fixes are applied to the latest released major version only.
 
 **Please do not open a public issue for security vulnerabilities.**
 
-- Preferred: open a [GitHub private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
-  on this repository ("Security" tab → "Report a vulnerability").
-- Alternatively, email the maintainer (see the repository profile) with the
-  subject line `QSAFE SECURITY`.
+The canonical reporting channel is a **GitHub private security advisory**:
+<https://github.com/SP1R4/Qsafe/security/advisories/new> (repository → "Security"
+tab → "Report a vulnerability"). This keeps the report private until a fix is
+ready and lets us collaborate on it directly.
+
+If you cannot use GitHub advisories, contact the maintainer
+([@SP1R4](https://github.com/SP1R4)) with the subject line `QSAFE SECURITY`.
 
 Please include: affected version/commit, a description, and ideally a minimal
 reproducer (a crafted input file is ideal — see the fuzzing harness in
-`tests/fuzz_decrypt.c`).
+`tests/fuzz_decrypt.c`). Reviewers: see [docs/REVIEW.md](docs/REVIEW.md) for a
+guided map of the crypto-critical code.
 
 ### What to expect
 
