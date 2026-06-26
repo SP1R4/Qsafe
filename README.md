@@ -464,6 +464,26 @@ Stored in the clear — it contains no secret material and is all that
 
 ## Key Management
 
+### Keyring (named identities)
+
+Instead of juggling key-file paths, you can keep keys in a keyring under
+`~/.qsafe` (override with `$QSAFE_HOME`):
+
+```bash
+qsafe keygen --identity me                 # ~/.qsafe/identities/me/
+qsafe keys import alice alice_pub.bin       # save a recipient under a name
+qsafe keys list                             # identities + recipients, with fingerprints
+
+qsafe encrypt -r alice -r me report.pdf     # -r takes keyring names or paths
+qsafe decrypt --identity me report.pdf.qsafe
+qsafe keys remove alice
+qsafe keys path                             # print the keyring location
+```
+
+Layout: `~/.qsafe/identities/<name>/{secret_key.bin,public_key.bin}` and
+`~/.qsafe/recipients/<name>.pub`. For `-r`, a real file path always wins over a
+keyring name. Names may not contain path separators.
+
 ### Generated Artifacts
 
 | File | Size | Contents |

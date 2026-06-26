@@ -383,6 +383,38 @@ env QSAFE_PASSPHRASE="v5-fixture-pass" "$BINARY" --key-file "$FIX/v5_key" \
 check_ok "decrypts a QSAFE005 file produced by v5.0.0" \
     cmp -s "$FIX/v5_msg.expected" "$TMPDIR/v5.out"
 
+# --- Test 19: keyring / named identities ---
+echo ""
+echo "[test: keyring]"
+export QSAFE_HOME="$TMPDIR/kr"
+check_ok "keygen --identity alice" "$BINARY" keygen --identity alice
+check_ok "keygen --identity bob"   "$BINARY" keygen --identity bob
+"$BINARY" keys list 2>/dev/null | grep -q "alice" \
+    && pass "keys list shows identities" || fail "keys list shows identities"
+echo "keyring secret" > "$TMPDIR/kr_msg.txt"
+check_ok "encrypt to keyring names (-r alice -r bob)" \
+    "$BINARY" encrypt -r alice -r bob "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_msg.q"
+"$BINARY" inspect "$TMPDIR/kr_msg.q" 2>/dev/null | grep -q "Recipients: 2" \
+    && pass "two named recipients encoded" || fail "two named recipients encoded"
+check_ok "decrypt --identity alice" \
+    "$BINARY" decrypt --identity alice "$TMPDIR/kr_msg.q" "$TMPDIR/kr_alice.out"
+check_ok "keyring round-trip matches (alice)" \
+    diff -q "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_alice.out"
+check_ok "decrypt --identity bob" \
+    "$BINARY" decrypt --identity bob "$TMPDIR/kr_msg.q" "$TMPDIR/kr_bob.out"
+check_ok "keyring round-trip matches (bob)" \
+    diff -q "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_bob.out"
+# Import an external public key as a named recipient, use it, then remove it.
+check_ok "keys import recipient" "$BINARY" keys import friend "$KEYFILE.pub"
+check_ok "encrypt to imported recipient" \
+    "$BINARY" encrypt -r friend "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_friend.q"
+check_ok "imported recipient's key decrypts" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/kr_friend.q"
+check_ok "keys remove recipient" "$BINARY" keys remove friend
+check_fail "encrypt to unknown name is rejected" \
+    "$BINARY" encrypt -r nobody "$TMPDIR/kr_msg.txt" "$TMPDIR/kr_x.q"
+unset QSAFE_HOME
+
 # --- Results ---
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed ==="

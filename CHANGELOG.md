@@ -7,6 +7,10 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Keyring / named identities** under `~/.qsafe` (override `$QSAFE_HOME`):
+  `keys` subcommand (`list`/`path`/`import`/`remove`), `--identity <name>` to
+  use/create a keyring identity, and `-r <name>` to address recipients by name
+  (a real file path still wins).
 - **Windows support** (MSYS2 / MinGW-w64): a platform shim (`include/platform.h`)
   for binary stdio, no-echo console input, temp files, `mkdir`, `realpath`,
   `chmod`, and `utime`; Makefile auto-detects MinGW and builds `qsafe.exe`; a

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #ifndef _WIN32
   #include <unistd.h>
   #include <termios.h>
@@ -33,6 +34,7 @@ static void print_usage(void) {
     printf("  %s sign-keygen [options]\n", PROGRAM_NAME);
     printf("  %s sign    [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s verify-sig [options] <input> [signature]\n", PROGRAM_NAME);
+    printf("  %s keys    <list|path|import <name> <pubkey>|remove <name>>\n", PROGRAM_NAME);
     printf("\n");
     printf("Commands:\n");
     printf("  keygen       Generate a hybrid X25519 + ML-KEM-1024 keypair (run once)\n");
@@ -44,6 +46,7 @@ static void print_usage(void) {
     printf("  sign-keygen  Generate an ML-DSA-87 signing keypair\n");
     printf("  sign         Create a detached signature for a file\n");
     printf("  verify-sig   Verify a detached signature against a file\n");
+    printf("  keys         Manage the keyring (~/.qsafe): list/import/remove recipients\n");
     printf("\n");
     printf("Files vs. directories are detected automatically. Use '-' as the input\n");
     printf("or output to read from stdin / write to stdout.\n");
@@ -51,7 +54,8 @@ static void print_usage(void) {
     printf("Options:\n");
     printf("  --key-file <path>       Secret key file (default: %s)\n", DEFAULT_SECRET_KEY_FILE);
     printf("  --pub-file <path>       Public key file (default: <key-file>%s)\n", PUBLIC_KEY_SUFFIX);
-    printf("  -r, --recipient <path>  encrypt: add a recipient public key (repeatable)\n");
+    printf("  -r, --recipient <p|name> encrypt: recipient public key path OR keyring name (repeatable)\n");
+    printf("  --identity <name>       use (or, for keygen, create) a keyring identity in ~/.qsafe\n");
     printf("  --passphrase <str>      Passphrase (discouraged; visible to other users)\n");
     printf("  --passphrase-file <p>   Read the passphrase from the first line of a file\n");
     printf("  --check                 decrypt/verify: authenticate only, write nothing\n");
@@ -260,6 +264,54 @@ static int make_temp_path(char *buf, size_t n) {
 #endif
 }
 
+/* ------------------------------- keyring ---------------------------------
+ * A simple on-disk store under $QSAFE_HOME (default ~/.qsafe):
+ *   identities/<name>/{secret_key.bin,public_key.bin}   your hybrid keypairs
+ *   recipients/<name>.pub                               known recipient keys
+ * Names may not contain path separators. `-r <name>` and `--identity <name>`
+ * resolve through here; a real file path always wins. */
+
+static int valid_keyname(const char *name) {
+    if (!name || !*name) return 0;
+    for (const char *c = name; *c; c++)
+        if (*c == '/' || *c == '\\' || *c == ':') return 0;
+    return strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
+}
+
+static int file_exists(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* Writes the keyring base dir into buf. Returns 1 on success. */
+static int keyring_base(char *buf, size_t n) {
+    const char *over = getenv("QSAFE_HOME");
+    if (over && *over) return (size_t)snprintf(buf, n, "%s", over) < n;
+    const char *home = qsafe_home_dir();
+    if (!home) return 0;
+    return (size_t)snprintf(buf, n, "%s/.qsafe", home) < n;
+}
+
+/* Writes identities/<name>/<leaf> into buf. Returns 1 on success. */
+static int keyring_identity_path(const char *name, const char *leaf, char *buf, size_t n) {
+    char base[MAX_PATH_LENGTH];
+    if (!keyring_base(base, sizeof(base))) return 0;
+    return (size_t)snprintf(buf, n, "%s/identities/%s%s%s", base, name,
+                            (leaf && *leaf) ? "/" : "", leaf ? leaf : "") < n;
+}
+
+/* Resolves a recipient argument to a public-key path in buf: a real file wins,
+ * else recipients/<name>.pub, else identities/<name>/public_key.bin. Returns 1. */
+static int resolve_recipient_path(const char *arg, char *buf, size_t n) {
+    if (file_exists(arg)) return (size_t)snprintf(buf, n, "%s", arg) < n;
+    if (!valid_keyname(arg)) return 0;
+    char base[MAX_PATH_LENGTH];
+    if (!keyring_base(base, sizeof(base))) return 0;
+    if ((size_t)snprintf(buf, n, "%s/recipients/%s.pub", base, arg) < n && file_exists(buf)) return 1;
+    if ((size_t)snprintf(buf, n, "%s/identities/%s/public_key.bin", base, arg) < n && file_exists(buf)) return 1;
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
      * by CRLF translation. No-op on POSIX. */
@@ -286,7 +338,8 @@ int main(int argc, char *argv[]) {
     const char *cli_passphrase = NULL;
     const char *passphrase_file = NULL;
     const char *pub_file_opt = NULL;
-    const char *positionals[2] = { NULL, NULL };
+    const char *identity_name = NULL;
+    const char *positionals[3] = { NULL, NULL, NULL };
     int npos = 0;
     int key_file_set = 0;
     const char *recipient_opts[QSAFE_MAX_RECIPIENTS];
@@ -321,6 +374,9 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             recipient_opts[n_recipient_opts++] = argv[i];
+        } else if (strcmp(a, "--identity") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --identity requires a name\n"); return 1; }
+            identity_name = argv[i];
         } else if (strcmp(a, "--pub-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --pub-file requires a path\n"); return 1; }
             pub_file_opt = argv[i];
@@ -349,7 +405,7 @@ int main(int argc, char *argv[]) {
             if (strcmp(a, "version") == 0) { printf("%s %s\n", PROGRAM_NAME, VERSION); return 0; }
             command = a;
         } else {
-            if (npos >= 2) {
+            if (npos >= 3) {
                 fprintf(stderr, "Error: too many arguments\n");
                 return 1;
             }
@@ -371,8 +427,9 @@ int main(int argc, char *argv[]) {
     int is_sign_keygen = strcmp(command, "sign-keygen") == 0;
     int is_sign = strcmp(command, "sign") == 0;
     int is_verify_sig = strcmp(command, "verify-sig") == 0;
+    int is_keys = strcmp(command, "keys") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
-        !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig) {
+        !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
         return 1;
@@ -387,6 +444,31 @@ int main(int argc, char *argv[]) {
      * with the hybrid encryption keypair. */
     if ((is_sign_keygen || is_sign || is_verify_sig) && !key_file_set) {
         config.secret_key_file = DEFAULT_SIGN_KEY_FILE;
+    }
+
+    /* --identity <name>: use (or, for keygen, create) a keyring identity. Its
+     * secret/public keys override --key-file/--pub-file. */
+    char id_sec[MAX_PATH_LENGTH], id_pub[MAX_PATH_LENGTH];
+    if (identity_name) {
+        if (!valid_keyname(identity_name)) {
+            fprintf(stderr, "Error: invalid identity name '%s'\n", identity_name);
+            return 1;
+        }
+        if (!keyring_identity_path(identity_name, "secret_key.bin", id_sec, sizeof(id_sec)) ||
+            !keyring_identity_path(identity_name, "public_key.bin", id_pub, sizeof(id_pub))) {
+            fprintf(stderr, "Error: could not resolve keyring path (is HOME/QSAFE_HOME set?)\n");
+            return 1;
+        }
+        if (is_keygen) {
+            char id_dir[MAX_PATH_LENGTH];
+            if (!keyring_identity_path(identity_name, "", id_dir, sizeof(id_dir)) ||
+                qsafe_mkdir_p(id_dir) != 0) {
+                fprintf(stderr, "Error: could not create keyring directory\n");
+                return 1;
+            }
+        }
+        config.secret_key_file = id_sec;
+        pub_file_opt = id_pub;
     }
 
     /* Resolve the public key file path (default: <secret-key>.pub). */
@@ -528,6 +610,108 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
+    /* ---------------- keys (keyring management) ---------------- */
+    if (is_keys) {
+        const char *sub = positionals[0];
+        char base[MAX_PATH_LENGTH];
+        if (!sub) {
+            fprintf(stderr, "Error: keys <list|path|import <name> <pubkey>|remove <name>>\n");
+            ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+        }
+        if (!keyring_base(base, sizeof(base))) {
+            fprintf(stderr, "Error: cannot locate keyring (set HOME or QSAFE_HOME)\n");
+            ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+        }
+        size_t explen = X25519_KEY_SIZE + kem->length_public_key;
+
+        if (strcmp(sub, "path") == 0) {
+            printf("%s\n", base);
+            ret = CRYPTO_SUCCESS; goto cleanup;
+        }
+        if (strcmp(sub, "list") == 0) {
+            char dir[MAX_PATH_LENGTH];
+            snprintf(dir, sizeof(dir), "%s/identities", base);
+            printf("Identities:\n");
+            DIR *d = opendir(dir);
+            if (d) {
+                struct dirent *e;
+                while ((e = readdir(d)) != NULL) {
+                    if (e->d_name[0] == '.') continue;
+                    char pubp[MAX_PATH_LENGTH], fp[65] = "";
+                    snprintf(pubp, sizeof(pubp), "%s/%s/public_key.bin", dir, e->d_name);
+                    if (file_exists(pubp)) {
+                        unsigned char *pk = crypto_load_public_key(pubp, explen, &config);
+                        if (pk) { crypto_fingerprint(pk, explen, fp, sizeof(fp)); free(pk); }
+                    }
+                    printf("  %-20s %s\n", e->d_name, fp);
+                }
+                closedir(d);
+            }
+            snprintf(dir, sizeof(dir), "%s/recipients", base);
+            printf("Recipients:\n");
+            d = opendir(dir);
+            if (d) {
+                struct dirent *e;
+                while ((e = readdir(d)) != NULL) {
+                    size_t L = strlen(e->d_name);
+                    if (e->d_name[0] == '.' || L < 4 || strcmp(e->d_name + L - 4, ".pub") != 0) continue;
+                    char pubp[MAX_PATH_LENGTH], fp[65] = "", name[256];
+                    snprintf(pubp, sizeof(pubp), "%s/%s", dir, e->d_name);
+                    snprintf(name, sizeof(name), "%.*s", (int)(L - 4), e->d_name);
+                    unsigned char *pk = crypto_load_public_key(pubp, explen, &config);
+                    if (pk) { crypto_fingerprint(pk, explen, fp, sizeof(fp)); free(pk); }
+                    printf("  %-20s %s\n", name, fp);
+                }
+                closedir(d);
+            }
+            ret = CRYPTO_SUCCESS; goto cleanup;
+        }
+        if (strcmp(sub, "import") == 0) {
+            const char *name = positionals[1], *src = positionals[2];
+            if (!name || !src) {
+                fprintf(stderr, "Error: keys import <name> <pubkey-file>\n");
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
+            if (!valid_keyname(name)) {
+                fprintf(stderr, "Error: invalid recipient name '%s'\n", name);
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
+            unsigned char *pk = crypto_load_public_key(src, explen, &config);
+            if (!pk) {
+                fprintf(stderr, "Error: '%s' is not a valid hybrid public key\n", src);
+                ret = CRYPTO_ERR_FILE_IO; goto cleanup;
+            }
+            char rdir[MAX_PATH_LENGTH], dest[MAX_PATH_LENGTH];
+            snprintf(rdir, sizeof(rdir), "%s/recipients", base);
+            if (qsafe_mkdir_p(rdir) != 0) {
+                fprintf(stderr, "Error: cannot create %s\n", rdir);
+                free(pk); ret = CRYPTO_ERR_FILE_IO; goto cleanup;
+            }
+            snprintf(dest, sizeof(dest), "%s/%s.pub", rdir, name);
+            ret = crypto_save_public_key(dest, pk, explen, &config);
+            free(pk);
+            if (ret == CRYPTO_SUCCESS) printf("Imported recipient '%s'\n", name);
+            goto cleanup;
+        }
+        if (strcmp(sub, "remove") == 0) {
+            const char *name = positionals[1];
+            if (!name || !valid_keyname(name)) {
+                fprintf(stderr, "Error: keys remove <name>\n");
+                ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+            }
+            char dest[MAX_PATH_LENGTH];
+            snprintf(dest, sizeof(dest), "%s/recipients/%s.pub", base, name);
+            if (remove(dest) != 0) {
+                fprintf(stderr, "Error: no such recipient '%s'\n", name);
+                ret = CRYPTO_ERR_FILE_IO; goto cleanup;
+            }
+            printf("Removed recipient '%s'\n", name);
+            ret = CRYPTO_SUCCESS; goto cleanup;
+        }
+        fprintf(stderr, "Error: unknown keys subcommand '%s'\n", sub);
+        ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+    }
+
     /* ---------------- rekey ---------------- */
     if (is_rekey) {
         if (npos != 0) {
@@ -630,9 +814,17 @@ int main(int argc, char *argv[]) {
         /* Recipients are the --recipient public keys, or the default key. */
         if (n_recipient_opts > 0) {
             for (int i = 0; i < n_recipient_opts; i++) {
-                recipient_bufs[i] = crypto_load_public_key(recipient_opts[i], expect_pub, &config);
+                /* Resolve "-r <arg>": a real file path, or a keyring name. */
+                char rpath[MAX_PATH_LENGTH];
+                if (!resolve_recipient_path(recipient_opts[i], rpath, sizeof(rpath))) {
+                    fprintf(stderr, "Error: recipient '%s' is not a file or a known keyring name\n",
+                            recipient_opts[i]);
+                    ret = CRYPTO_ERR_INVALID_INPUT;
+                    goto cleanup;
+                }
+                recipient_bufs[i] = crypto_load_public_key(rpath, expect_pub, &config);
                 if (!recipient_bufs[i]) {
-                    fprintf(stderr, "Error: could not load recipient public key '%s'\n", recipient_opts[i]);
+                    fprintf(stderr, "Error: could not load recipient public key '%s'\n", rpath);
                     ret = CRYPTO_ERR_FILE_IO;
                     goto cleanup;
                 }
