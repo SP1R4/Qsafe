@@ -18,8 +18,8 @@ Security fixes are applied to the latest released major version only.
 
 | Version | Supported |
 |:--|:--|
-| 5.x | ✅ |
-| ≤ 4.x | ❌ (format superseded; see README "Compatibility") |
+| 7.x | ✅ |
+| ≤ 6.x | ❌ (superseded; see README "Compatibility") |
 
 ## Reporting a vulnerability
 

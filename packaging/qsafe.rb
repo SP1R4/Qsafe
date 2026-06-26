@@ -2,7 +2,7 @@
 #
 # This is a template for a Homebrew tap. To publish:
 #   1. Create a tap repo, e.g. github.com/SP1R4/homebrew-qsafe
-#   2. Tag a release (git tag v6.0.0 && git push --tags); the release workflow
+#   2. Tag a release (git tag v7.0.0 && git push --tags); the release workflow
 #      attaches qsafe-vX-*.tar.gz artifacts.
 #   3. Update `url` to the source tarball for the tag and fill in `sha256`
 #      (`brew fetch` or `shasum -a 256` on the downloaded tarball).
@@ -12,8 +12,9 @@
 class Qsafe < Formula
   desc "Hybrid post-quantum file encryption and signing (X25519 + ML-KEM-1024)"
   homepage "https://github.com/SP1R4/Qsafe"
-  url "https://github.com/SP1R4/Qsafe/archive/refs/tags/v6.0.0.tar.gz"
-  sha256 "def12946cec4eff59746bb467562c055b9d63dcd805738b88a969934919f5177"
+  url "https://github.com/SP1R4/Qsafe/archive/refs/tags/v7.0.0.tar.gz"
+  # Fill in after tagging: shasum -a 256 on the v7.0.0 source tarball.
+  sha256 "REPLACE_WITH_v7.0.0_SOURCE_TARBALL_SHA256"
   license "MIT"
 
   depends_on "openssl@3"

@@ -22,7 +22,7 @@ typedef enum {
     QSAFE_ERR_AUTH = 5      /* authentication / signature verification failed */
 } qsafe_status;
 
-/* Library version string, e.g. "6.0.0". */
+/* Library version string, e.g. "7.0.0". */
 const char *qsafe_version(void);
 
 /* Human-readable message for a status code. */
