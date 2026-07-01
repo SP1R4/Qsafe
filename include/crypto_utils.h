@@ -195,6 +195,18 @@ crypto_error_t crypto_generate_identity(OQS_KEM *kem,
                                         unsigned char **public_blob, size_t *public_len,
                                         unsigned char **secret_blob, size_t *secret_len);
 
+/* Hybrid (X25519 + ML-KEM) wrap/unwrap of an arbitrary small key into a
+ * recipient record: e_pk(32) | kem_ct | nonce(12) | wrapped_key(key_len) |
+ * tag(16). `label` is the HKDF info string (domain separation per consuming
+ * format — the QSAFE container uses "qsafe-v5-hybrid-kek"). Exposed for the
+ * age plugin, which wraps age's 16-byte file key with a distinct label. */
+crypto_error_t crypto_hybrid_wrap(OQS_KEM *kem, const unsigned char *recipient_pub,
+                                  const char *label, const unsigned char *key,
+                                  size_t key_len, unsigned char *rec);
+int crypto_hybrid_unwrap(OQS_KEM *kem, const unsigned char *secret_blob,
+                         const char *label, const unsigned char *rec,
+                         size_t key_len, unsigned char *key_out);
+
 /* Encrypts to one or more recipients. recipient_pubs is an array of n_recipients
  * public blobs, each X25519_KEY_SIZE + kem->length_public_key bytes. */
 crypto_error_t crypto_encrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem,

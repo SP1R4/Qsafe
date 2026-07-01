@@ -545,6 +545,32 @@ else
     pass "real-age cross-check skipped (age not installed)"
 fi
 
+# --- Test 20b: age-plugin-qsafe (post-quantum age recipients) ---
+echo ""
+echo "[test: age plugin]"
+PLUGIN_BIN="$PROJECT_DIR/age-plugin-qsafe"
+if [ -x "$PLUGIN_BIN" ]; then
+    "$PLUGIN_BIN" --keygen -o "$TMPDIR/plug_id.txt" 2>"$TMPDIR/plug_pub.txt"
+    PREC=$(grep -o 'age1qsafe1[a-z0-9]*' "$TMPDIR/plug_pub.txt" | head -1)
+    [ -n "$PREC" ] && pass "plugin keygen emits a recipient" || fail "plugin keygen emits a recipient"
+    DERIVED=$("$PLUGIN_BIN" -y "$TMPDIR/plug_id.txt")
+    [ "$DERIVED" = "$PREC" ] && pass "plugin -y derives the recipient" || fail "plugin -y derives the recipient"
+    if command -v age >/dev/null 2>&1; then
+        echo "post-quantum age plugin round-trip" > "$TMPDIR/plug_pt.txt"
+        PATH="$PROJECT_DIR:$PATH" age -r "$PREC" -o "$TMPDIR/plug_ct.age" "$TMPDIR/plug_pt.txt" >/dev/null 2>&1
+        PATH="$PROJECT_DIR:$PATH" age -d -i "$TMPDIR/plug_id.txt" -o "$TMPDIR/plug_out.txt" "$TMPDIR/plug_ct.age" >/dev/null 2>&1
+        check_ok "age round-trips through the qsafe plugin" \
+            diff -q "$TMPDIR/plug_pt.txt" "$TMPDIR/plug_out.txt"
+        "$PLUGIN_BIN" --keygen -o "$TMPDIR/plug_id2.txt" 2>/dev/null
+        check_fail "wrong plugin identity is rejected" \
+            env PATH="$PROJECT_DIR:$PATH" age -d -i "$TMPDIR/plug_id2.txt" -o "$TMPDIR/plug_bad.txt" "$TMPDIR/plug_ct.age"
+    else
+        pass "age plugin protocol test skipped (age not installed)"
+    fi
+else
+    pass "age plugin tests skipped (plugin not built)"
+fi
+
 # --- Test 21: macOS Keychain-backed passphrase ---
 echo ""
 echo "[test: keychain]"

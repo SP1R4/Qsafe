@@ -69,7 +69,16 @@ TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
 TEST_EXECUTABLE = $(TEST_DIR)/test_crypto$(EXEEXT)
 
-all: $(EXECUTABLE)
+# age plugin: post-quantum hybrid recipients for the age ecosystem.
+PLUGIN = age-plugin-qsafe$(EXEEXT)
+PLUGIN_OBJECTS = $(SRC_DIR)/age_plugin.o $(SRC_DIR)/crypto_utils.o
+
+all: $(EXECUTABLE) $(PLUGIN)
+
+plugin: $(PLUGIN)
+
+$(PLUGIN): $(PLUGIN_OBJECTS)
+	$(CC) $(EXTRA_CFLAGS) $(PLUGIN_OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 # EXTRA_CFLAGS / EXTRA_LDFLAGS are appended to every compile and link, so CI can
 # layer in sanitizers without clobbering the baseline flags, e.g.:
@@ -116,9 +125,10 @@ MANDIR ?= $(PREFIX)/share/man/man1
 BASHCOMPDIR ?= $(PREFIX)/etc/bash_completion.d
 ZSHCOMPDIR ?= $(PREFIX)/share/zsh/site-functions
 
-install: $(EXECUTABLE)
+install: $(EXECUTABLE) $(PLUGIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(EXECUTABLE) $(DESTDIR)$(BINDIR)/$(EXECUTABLE)
+	install -m 0755 $(PLUGIN) $(DESTDIR)$(BINDIR)/$(PLUGIN)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 0644 docs/qsafe.1 $(DESTDIR)$(MANDIR)/qsafe.1
 
@@ -136,6 +146,6 @@ uninstall:
 	rm -f $(DESTDIR)$(ZSHCOMPDIR)/_qsafe
 
 clean:
-	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY)
+	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY) $(PLUGIN) $(SRC_DIR)/age_plugin.o
 
-.PHONY: all test lib fuzz install install-completions uninstall clean
+.PHONY: all test lib plugin fuzz install install-completions uninstall clean

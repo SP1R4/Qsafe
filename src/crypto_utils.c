@@ -853,9 +853,11 @@ crypto_error_t crypto_generate_identity(OQS_KEM *kem,
 }
 
 /* Builds one recipient record into `rec` (size = X25519_KEY_SIZE + kem ct +
- * nonce + CEK + tag) wrapping `cek` to recipient_pub. Returns CRYPTO_SUCCESS. */
-static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipient_pub,
-                                      const unsigned char cek[QSAFE_CEK_SIZE], unsigned char *rec) {
+ * nonce + key_len + tag) wrapping `key` to recipient_pub, deriving the KEK
+ * under `label` (domain separation per consuming format). */
+crypto_error_t crypto_hybrid_wrap(OQS_KEM *kem, const unsigned char *recipient_pub,
+                                  const char *label, const unsigned char *key,
+                                  size_t key_len, unsigned char *rec) {
     crypto_error_t ret = CRYPTO_ERR_CRYPTO;
     unsigned char eph_sec[X25519_KEY_SIZE];
     unsigned char dh[X25519_KEY_SIZE];
@@ -867,8 +869,8 @@ static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipie
     unsigned char *p_eph = rec;
     unsigned char *p_ct  = p_eph + X25519_KEY_SIZE;
     unsigned char *p_non = p_ct + kem->length_ciphertext;
-    unsigned char *p_cek = p_non + AES_GCM_NONCE_SIZE;
-    unsigned char *p_tag = p_cek + QSAFE_CEK_SIZE;
+    unsigned char *p_key = p_non + AES_GCM_NONCE_SIZE;
+    unsigned char *p_tag = p_key + key_len;
 
     if (!x25519_keypair(eph_sec, p_eph)) goto done;
     if (!x25519_dh(eph_sec, recipient_pub, dh)) goto done;
@@ -876,10 +878,10 @@ static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipie
 
     memcpy(ikm, dh, X25519_KEY_SIZE);
     memcpy(ikm + X25519_KEY_SIZE, kem_ss, kem->length_shared_secret);
-    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, HKDF_HYBRID_LABEL, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
+    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, label, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
 
     if (RAND_bytes(p_non, AES_GCM_NONCE_SIZE) != 1) goto done;
-    if (!gcm_seal(kek, p_non, cek, QSAFE_CEK_SIZE, p_cek, p_tag)) goto done;
+    if (!gcm_seal(kek, p_non, key, (int)key_len, p_key, p_tag)) goto done;
     ret = CRYPTO_SUCCESS;
 
 done:
@@ -891,15 +893,16 @@ done:
     return ret;
 }
 
-/* Attempts to recover the CEK from one recipient record using our secret blob.
- * Returns 1 if the wrap authenticates (cek filled), 0 otherwise. */
-static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
-                             const unsigned char *rec, unsigned char cek[QSAFE_CEK_SIZE]) {
+/* Attempts to recover a wrapped key from one recipient record using our secret
+ * blob. Returns 1 if the wrap authenticates (key filled), 0 otherwise. */
+int crypto_hybrid_unwrap(OQS_KEM *kem, const unsigned char *secret_blob,
+                         const char *label, const unsigned char *rec,
+                         size_t key_len, unsigned char *key_out) {
     const unsigned char *p_eph = rec;
     const unsigned char *p_ct  = p_eph + X25519_KEY_SIZE;
     const unsigned char *p_non = p_ct + kem->length_ciphertext;
-    const unsigned char *p_cek = p_non + AES_GCM_NONCE_SIZE;
-    const unsigned char *p_tag = p_cek + QSAFE_CEK_SIZE;
+    const unsigned char *p_key = p_non + AES_GCM_NONCE_SIZE;
+    const unsigned char *p_tag = p_key + key_len;
 
     unsigned char dh[X25519_KEY_SIZE];
     unsigned char *kem_ss = malloc(kem->length_shared_secret);
@@ -912,8 +915,8 @@ static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
     if (OQS_KEM_decaps(kem, kem_ss, p_ct, secret_blob + X25519_KEY_SIZE) != OQS_SUCCESS) goto done;
     memcpy(ikm, dh, X25519_KEY_SIZE);
     memcpy(ikm + X25519_KEY_SIZE, kem_ss, kem->length_shared_secret);
-    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, HKDF_HYBRID_LABEL, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
-    ok = gcm_open(kek, p_non, p_cek, QSAFE_CEK_SIZE, p_tag, cek);
+    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, label, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
+    ok = gcm_open(kek, p_non, p_key, (int)key_len, p_tag, key_out);
 
 done:
     OPENSSL_cleanse(dh, sizeof(dh));
@@ -921,6 +924,17 @@ done:
     OPENSSL_cleanse(kek, sizeof(kek));
     if (kem_ss) { OPENSSL_cleanse(kem_ss, kem->length_shared_secret); free(kem_ss); }
     return ok;
+}
+
+/* v5/v6/v7 container wrappers (fixed 32-byte CEK, v5 hybrid label). */
+static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipient_pub,
+                                      const unsigned char cek[QSAFE_CEK_SIZE], unsigned char *rec) {
+    return crypto_hybrid_wrap(kem, recipient_pub, HKDF_HYBRID_LABEL, cek, QSAFE_CEK_SIZE, rec);
+}
+
+static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
+                             const unsigned char *rec, unsigned char cek[QSAFE_CEK_SIZE]) {
+    return crypto_hybrid_unwrap(kem, secret_blob, HKDF_HYBRID_LABEL, rec, QSAFE_CEK_SIZE, cek);
 }
 
 crypto_error_t crypto_encrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem,
