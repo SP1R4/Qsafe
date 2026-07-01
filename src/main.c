@@ -82,7 +82,7 @@ static void print_usage(void) {
     printf("  --shares <n>            split-key: total shares to create (t-255)\n");
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
-    printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS)\n");
+    printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS/Windows)\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
     printf("  --help                  Display this help message\n");

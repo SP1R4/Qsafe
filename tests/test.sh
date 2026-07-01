@@ -605,8 +605,23 @@ case "$(uname -s)" in
     check_fail "decrypt --keychain fails after the item is removed" \
         "$BINARY" decrypt --keychain --key-file "$KCKEY" "$TMPDIR/kc.q" "$TMPDIR/kc.bad"
     ;;
+  MINGW*|MSYS*|CYGWIN*)
+    # Windows DPAPI backend: functional round-trip (no CLI inspector like
+    # `security`, so assert behavior end to end).
+    KCKEY="$TMPDIR/kc_key.bin"
+    "$BINARY" keygen --keychain --key-file "$KCKEY" >/dev/null 2>&1
+    echo "keychain-protected secret" > "$TMPDIR/kc_pt.txt"
+    "$BINARY" encrypt --key-file "$KCKEY" "$TMPDIR/kc_pt.txt" "$TMPDIR/kc.q" >/dev/null 2>&1
+    check_ok "decrypt --keychain round-trips (DPAPI)" \
+        "$BINARY" decrypt --keychain --key-file "$KCKEY" "$TMPDIR/kc.q" "$TMPDIR/kc.out"
+    check_ok "keychain round-trip matches" \
+        diff -q "$TMPDIR/kc_pt.txt" "$TMPDIR/kc.out"
+    # A different account (key path) must not resolve to the same item.
+    check_fail "keychain item is bound to the key path" \
+        "$BINARY" decrypt --keychain --key-file "$TMPDIR/other_key.bin" "$TMPDIR/kc.q" "$TMPDIR/kc.bad"
+    ;;
   *)
-    pass "keychain test skipped (macOS only)"
+    pass "keychain test skipped (no backend on this platform)"
     ;;
 esac
 
