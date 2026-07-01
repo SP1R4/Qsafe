@@ -807,7 +807,7 @@ static int gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned ch
 /* Padmé padded size (from the PURBs paper): round L up so that only
  * O(log log L) mantissa bits survive, bounding the leak about the true length
  * while keeping overhead under ~12%. Returns the padded length (>= L). */
-static uint64_t padme_size(uint64_t L) {
+uint64_t crypto_padme_size(uint64_t L) {
     if (L < 2) return L;
     int E = 63 - __builtin_clzll(L);                 /* floor(log2 L) */
     int S = 64 - __builtin_clzll((uint64_t)E);       /* floor(log2 E) + 1 */
@@ -1033,7 +1033,7 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
             ret = CRYPTO_ERR_INVALID_INPUT;
             goto cleanup;
         }
-        pad_len = padme_size(content_len) - content_len;
+        pad_len = crypto_padme_size(content_len) - content_len;
         if (pad_len > 0) meta[0] |= QSAFE_META_FLAG_PADDED;
     }
     if (signing) meta[0] |= QSAFE_META_FLAG_SIGNED;

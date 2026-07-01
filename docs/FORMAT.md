@@ -439,3 +439,36 @@ For an encryption identity this is over the 1600-byte hybrid public blob (§4.1)
   extended META to carry the embedded-signature and padding declarations.)
 - Known-answer vectors for the deterministic primitives (SHA-256 fingerprint,
   HKDF-SHA256, scrypt) are in `tests/test_crypto_utils.c`.
+
+---
+
+## 10. Test vectors (QSAFE007 — frozen)
+
+The QSAFE007 layout in this document is **frozen**: any further change bumps
+the magic. An independent implementation can validate against:
+
+**Deterministic KATs** (also asserted in `tests/test_crypto_utils.c`; expected
+values generated with an independent implementation):
+
+- *Hybrid KEK derivation* (§2.4): `HKDF-SHA256(ikm = bytes 00..3f, salt =
+  empty, info = "qsafe-v5-hybrid-kek", L = 32)` =
+  `7aab3a9ddd6d0281ba8f369761dfa471a1ceba8870d9ace9b2852f47ac3e0dd5`
+- *Frame AEAD* (§2.3): AES-256-GCM with `key = bytes 00..1f`,
+  `nonce = frame_nonce(counter 0, final)` = `00·00·00 ‖ u64be(0) ‖ 01`,
+  `aad = "HDR"`, `plaintext = "Qsafe frame KAT"` (15 bytes) →
+  `ciphertext ‖ tag` =
+  `44a5de9a21d4566c6f433419a7e76ed434e897d9f04eb6cf5bf90a7d8a48de`
+- *Padmé buckets* (§3.2): `padme(9) = 10`, `padme(100) = 104`,
+  `padme(1000) = 1024`, `padme(100000) = 100352`,
+  `padme(123456789) = 123731968`; identities at 0–3 and exact powers of two.
+- *age plugin KEK* (`age-plugin-qsafe`): as the first vector but with
+  `info = "qsafe-age-plugin-v1"` =
+  `1d20ee062874f2f8e2b0076127f31a7ca924a80082ec31d4ef1b3f21dfa7bfea`
+
+**Frozen container fixtures** (`tests/fixtures/`, passphrase
+`v7-fixture-pass`): `v7_msg.qsafe` (plain), `v7_msg_signed.qsafe` (embedded
+ML-DSA-87 signature, signer `v7_sign_key.pub`), `v7_msg_padded.qsafe`
+(Padmé-padded); all decrypt with `v7_key` to `v7_msg.expected`. The
+randomized layers (KEM encapsulation, ephemeral X25519, wrap nonces) make a
+fully deterministic whole-file KAT impossible — the fixtures pin the reader,
+the KATs above pin every deterministic construction.

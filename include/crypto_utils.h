@@ -158,6 +158,9 @@ typedef struct {
 void crypto_handle_errors(void);
 void crypto_print_progress_bar(size_t current, size_t total);
 
+/* Padmé padded size for a plaintext of length L (§3.2 of docs/FORMAT.md). */
+uint64_t crypto_padme_size(uint64_t L);
+
 /* Writes a lowercase hex SHA-256 fingerprint of (data,len) into out (needs >= 65
  * bytes). Used to give public keys a short human-verifiable identity. */
 crypto_error_t crypto_fingerprint(const unsigned char *data, size_t len, char *out, size_t outsz);

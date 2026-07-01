@@ -390,6 +390,18 @@ env QSAFE_PASSPHRASE="v6-fixture-pass" "$BINARY" --key-file "$FIX/v6_key" \
     decrypt "$FIX/v6_msg.qsafe" "$TMPDIR/v6.out" >/dev/null 2>&1
 check_ok "decrypts a QSAFE006 file produced by v7.0.0" \
     cmp -s "$FIX/v6_msg.expected" "$TMPDIR/v6.out"
+# Frozen QSAFE007 vectors: plain, signed, and padded fixtures must keep
+# decrypting bit-for-bit as the reader evolves.
+for VAR in "" "_signed" "_padded"; do
+    env QSAFE_PASSPHRASE="v7-fixture-pass" "$BINARY" --force --key-file "$FIX/v7_key" \
+        decrypt "$FIX/v7_msg$VAR.qsafe" "$TMPDIR/v7$VAR.out" >/dev/null 2>&1
+    check_ok "decrypts the frozen QSAFE007${VAR:-_plain} fixture" \
+        cmp -s "$FIX/v7_msg.expected" "$TMPDIR/v7$VAR.out"
+done
+env QSAFE_PASSPHRASE="v7-fixture-pass" "$BINARY" --key-file "$FIX/v7_key" \
+    --signer "$FIX/v7_sign_key.pub" verify "$FIX/v7_msg_signed.qsafe" >/dev/null 2>&1 \
+    && pass "frozen signed fixture verifies against its signer" \
+    || fail "frozen signed fixture verifies against its signer"
 
 # --- Test 18b: embedded sender signatures (QSAFE007 signed mode) ---
 echo ""
