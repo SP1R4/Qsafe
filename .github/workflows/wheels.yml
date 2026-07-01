@@ -1,0 +1,85 @@
+name: Wheels
+
+# Builds PyPI wheels for the Python bindings (libqsafe bundled per platform)
+# with cibuildwheel. Publishing runs only on version tags, via PyPI "trusted
+# publishing" (configure the GitHub environment on pypi.org; no token secret).
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "python/**"
+      - "setup.py"
+      - "pyproject.toml"
+      - ".github/workflows/wheels.yml"
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2
+        env:
+          # The bindings are ctypes-only and tagged py3-none-<plat>; one
+          # CPython per platform is enough to produce the wheel.
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-musllinux* *_i686"
+          # manylinux: build OpenSSL-linked liboqs from source; openssl-devel
+          # comes from the distro.
+          CIBW_BEFORE_ALL_LINUX: >
+            yum install -y openssl-devel cmake ninja-build git ||
+            dnf install -y openssl-devel cmake ninja-build git;
+            git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs &&
+            cmake -S /tmp/liboqs -B /tmp/liboqs/build -GNinja
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON
+            -DCMAKE_INSTALL_PREFIX=/usr/local &&
+            cmake --build /tmp/liboqs/build &&
+            cmake --install /tmp/liboqs/build &&
+            ldconfig
+          CIBW_BEFORE_ALL_MACOS: brew install openssl@3 liboqs
+          # Bundle libqsafe's own dependencies (liboqs, libcrypto) into the
+          # wheel so it is self-contained.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel repair -w {dest_dir} {wheel}
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
+            delocate-wheel -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: >
+            env QSAFE_TEST_INSTALLED=1 python {project}/python/test_qsafe.py
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: build-wheels
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

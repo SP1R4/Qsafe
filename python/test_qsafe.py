@@ -11,7 +11,15 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# For in-repo runs, prefer the source package. Set QSAFE_TEST_INSTALLED=1 to
+# test an installed wheel instead (used by the wheels CI) — that also has to
+# undo Python's automatic script-directory sys.path entry, which would shadow
+# the installed package with the source one.
+_here = os.path.dirname(os.path.abspath(__file__))
+if os.environ.get("QSAFE_TEST_INSTALLED"):
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != _here]
+else:
+    sys.path.insert(0, _here)
 import qsafe  # noqa: E402
 
 
