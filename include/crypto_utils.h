@@ -45,6 +45,34 @@
 #define VERSION_HEADER_V6 "QSAFE006"
 #define QSAFE_FRAME_SIZE 65536
 
+/* v7 (QSAFE007) keeps the v6 header and framing but extends the encrypted
+ * metadata block (§META v7) with a content length and a padding length, which
+ * enables two optional, individually-flagged features:
+ *   - embedded sender authentication: an ML-DSA-87 public key + signature over
+ *     (header ‖ META ‖ contents) travels INSIDE the encrypted payload as a
+ *     fixed-size trailer, so decrypt can verify who encrypted the file without
+ *     a separate detached signature — and the signer identity stays hidden
+ *     from anyone who cannot decrypt;
+ *   - Padmé size-hiding padding: random bytes appended after the trailer so
+ *     the ciphertext length only reveals a bucketed size, not the exact one.
+ * encrypt always writes v7; decrypt reads v7, v6 and v5. */
+#define VERSION_HEADER_V7 "QSAFE007"
+
+/* ML-DSA-87 sizes (FIPS 204); asserted against liboqs at runtime. */
+#define QSAFE_SIG_PUB_SIZE 2592
+#define QSAFE_SIG_MAX_SIZE 4627
+
+/* Signed-sender trailer: signer_pub(2592) | u16 sig_len | signature zero-padded
+ * to QSAFE_SIG_MAX_SIZE. Fixed size so a streaming reader can hold it back. */
+#define QSAFE_TRAILER_SIZE (QSAFE_SIG_PUB_SIZE + 2 + QSAFE_SIG_MAX_SIZE) /* 7221 */
+
+/* Domain-separation prefix hashed before (header ‖ META ‖ contents) for the
+ * embedded signature, so it can never be confused with a detached signature. */
+#define QSAFE_SIGNED_CONTEXT "qsafe-v7-signed"
+
+/* content_len value meaning "unknown" (stdin input). */
+#define QSAFE_LEN_UNKNOWN UINT64_MAX
+
 /* X25519 raw key size and the random content-encryption key wrapped per
  * recipient. A v5 recipient record is, in order:
  *   ephemeral_x25519_pub(32) | kem_ciphertext | wrap_nonce(12) |
@@ -66,7 +94,16 @@
 #define QSAFE_META_NAME_FIELD 256
 #define QSAFE_META_SIZE (1 + 1 + 2 + QSAFE_META_NAME_FIELD + 4 + 8) /* 272 */
 
+/* v7 metadata block appends, after the v5/v6 fields:
+ *   u64 content_len  (bytes of file contents; QSAFE_LEN_UNKNOWN for streams)
+ *   u64 pad_len      (bytes of random padding appended at the very end)
+ * Total 288 bytes. The flags byte gains bit 1 (signed trailer present) and
+ * bit 2 (padding present). */
+#define QSAFE_META_SIZE_V7 (QSAFE_META_SIZE + 8 + 8) /* 288 */
+
 #define QSAFE_META_FLAG_PRESENT 0x01
+#define QSAFE_META_FLAG_SIGNED  0x02
+#define QSAFE_META_FLAG_PADDED  0x04
 
 /* Secret-key file format.
  *
@@ -107,6 +144,15 @@ typedef struct {
     const char *public_key_file;
     const char *passphrase;
     int use_keychain;          /* derive/store the key passphrase in the OS keychain */
+
+    /* v7 signed-sender mode. encrypt: when sign_sk_file is set, embed an
+     * ML-DSA-87 signature (signer public key read from sign_pk_file) in the
+     * payload. decrypt: when signer_pk_file is set, additionally require the
+     * embedded signer key to equal its contents. */
+    const char *sign_sk_file;
+    const char *sign_pk_file;
+    const char *signer_pk_file;
+    int pad;                   /* encrypt: append Padmé size-hiding padding */
 } crypto_config_t;
 
 void crypto_handle_errors(void);

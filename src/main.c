@@ -70,6 +70,9 @@ static void print_usage(void) {
     printf("  --passphrase <str>      Passphrase (discouraged; visible to other users)\n");
     printf("  --passphrase-file <p>   Read the passphrase from the first line of a file\n");
     printf("  --check                 decrypt/verify: authenticate only, write nothing\n");
+    printf("  --sign-with <sk>        encrypt: embed an ML-DSA-87 sender signature (needs <sk>.pub)\n");
+    printf("  --signer <pk>           decrypt/verify: require the embedded signer to be this key\n");
+    printf("  --pad                   encrypt: hide the exact file size (Padme padding)\n");
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
     printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS)\n");
@@ -451,10 +454,15 @@ int main(int argc, char *argv[]) {
     config.public_key_file = NULL;
     config.passphrase = NULL;
     config.use_keychain = 0;
+    config.sign_sk_file = NULL;
+    config.sign_pk_file = NULL;
+    config.signer_pk_file = NULL;
+    config.pad = 0;
 
     const char *command = NULL;
     const char *cli_passphrase = NULL;
     const char *passphrase_file = NULL;
+    const char *sign_with = NULL;       /* encrypt: --sign-with signing secret key */
     const char *pub_file_opt = NULL;
     const char *identity_name = NULL;
     const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
@@ -484,6 +492,14 @@ int main(int argc, char *argv[]) {
             config.use_keychain = 1;
         } else if (strcmp(a, "--armor") == 0) {
             config.armor = 1;
+        } else if (strcmp(a, "--pad") == 0) {
+            config.pad = 1;
+        } else if (strcmp(a, "--sign-with") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --sign-with requires a signing key path\n"); return 1; }
+            sign_with = argv[i];
+        } else if (strcmp(a, "--signer") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --signer requires a public key path\n"); return 1; }
+            config.signer_pk_file = argv[i];
         } else if (strcmp(a, "--key-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --key-file requires a path\n"); return 1; }
             config.secret_key_file = argv[i];
@@ -955,6 +971,26 @@ int main(int argc, char *argv[]) {
     }
 
     size_t expect_pub = X25519_KEY_SIZE + kem->length_public_key;
+
+    char sign_pub_buf[MAX_PATH_LENGTH];
+    if (is_encrypt && sign_with) {
+        /* Embedded sender signature: the signing secret key needs its
+         * passphrase; the signer public key travels in the payload. */
+        config.sign_sk_file = sign_with;
+        if (snprintf(sign_pub_buf, sizeof(sign_pub_buf), "%s%s", sign_with, PUBLIC_KEY_SUFFIX)
+            >= (int)sizeof(sign_pub_buf)) {
+            fprintf(stderr, "Error: signing key path too long\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        config.sign_pk_file = sign_pub_buf;
+        /* The passphrase (and any keychain entry) belongs to the signing key. */
+        config.secret_key_file = sign_with;
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 0, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+    }
 
     if (is_encrypt) {
         /* Recipients are the --recipient public keys, or the default key. */

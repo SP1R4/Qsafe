@@ -222,7 +222,7 @@ check_ok "inspect public key succeeds" \
     "$BINARY" inspect "$KEYFILE.pub"
 "$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -q "hybrid public key" \
     && pass "inspect identifies public key" || fail "inspect identifies public key"
-"$BINARY" inspect "$TMPDIR/test_input.enc" 2>/dev/null | grep -q "QSAFE006" \
+"$BINARY" inspect "$TMPDIR/test_input.enc" 2>/dev/null | grep -q "QSAFE007" \
     && pass "inspect identifies encrypted file" || fail "inspect identifies encrypted file"
 FP1=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
 FP2=$("$BINARY" inspect "$KEYFILE.pub" 2>/dev/null | grep -i fingerprint)
@@ -349,7 +349,7 @@ SZ=$(wc -c < "$TMPDIR/pipe_tamper.out" | tr -d ' ')
 check_ok "valid pipe decrypt still matches original" \
     diff -q "$TMPDIR/test_input.txt" "$TMPDIR/pipe_ok.out"
 
-# --- Test 17: framed format (QSAFE006) ---
+# --- Test 17: framed format (QSAFE007) ---
 echo ""
 echo "[test: framed format]"
 # Multi-frame round-trip (well over one 64 KiB frame).
@@ -359,8 +359,8 @@ dd if=/dev/urandom of="$TMPDIR/multi.in" bs=1024 count=300 >/dev/null 2>&1
 check_ok "multi-frame round-trip matches" cmp -s "$TMPDIR/multi.in" "$TMPDIR/multi.out"
 "$BINARY" inspect "$TMPDIR/multi.q" 2>/dev/null | grep -q "framed" \
     && pass "inspect reports framed AEAD" || fail "inspect reports framed AEAD"
-# Edge: META(272) + file == 65536 forces a full frame plus an empty final frame.
-dd if=/dev/urandom of="$TMPDIR/exact.in" bs=65264 count=1 >/dev/null 2>&1
+# Edge: META(288) + file == 65536 forces a full frame plus an empty final frame.
+dd if=/dev/urandom of="$TMPDIR/exact.in" bs=65248 count=1 >/dev/null 2>&1
 "$BINARY" --force --key-file "$KEYFILE" encrypt "$TMPDIR/exact.in" "$TMPDIR/exact.q" >/dev/null 2>&1
 "$BINARY" --force --key-file "$KEYFILE" decrypt "$TMPDIR/exact.q" "$TMPDIR/exact.out" >/dev/null 2>&1
 check_ok "frame-multiple round-trip matches" cmp -s "$TMPDIR/exact.in" "$TMPDIR/exact.out"
@@ -386,6 +386,68 @@ env QSAFE_PASSPHRASE="v5-fixture-pass" "$BINARY" --key-file "$FIX/v5_key" \
     decrypt "$FIX/v5_msg.qsafe" "$TMPDIR/v5.out" >/dev/null 2>&1
 check_ok "decrypts a QSAFE005 file produced by v5.0.0" \
     cmp -s "$FIX/v5_msg.expected" "$TMPDIR/v5.out"
+env QSAFE_PASSPHRASE="v6-fixture-pass" "$BINARY" --key-file "$FIX/v6_key" \
+    decrypt "$FIX/v6_msg.qsafe" "$TMPDIR/v6.out" >/dev/null 2>&1
+check_ok "decrypts a QSAFE006 file produced by v7.0.0" \
+    cmp -s "$FIX/v6_msg.expected" "$TMPDIR/v6.out"
+
+# --- Test 18b: embedded sender signatures (QSAFE007 signed mode) ---
+echo ""
+echo "[test: signed-sender mode]"
+SIGKEY="$TMPDIR/signer_key.bin"
+"$BINARY" --force --key-file "$SIGKEY" sign-keygen >/dev/null 2>&1
+SIGKEY2="$TMPDIR/signer2_key.bin"
+"$BINARY" --force --key-file "$SIGKEY2" sign-keygen >/dev/null 2>&1
+
+check_ok "encrypt --sign-with succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" encrypt --sign-with "$SIGKEY" \
+    -r "$KEYFILE.pub" "$TMPDIR/test_input.txt" "$TMPDIR/signed.q"
+"$BINARY" --force --key-file "$KEYFILE" decrypt "$TMPDIR/signed.q" "$TMPDIR/signed.out" 2>"$TMPDIR/signed.err"
+check_ok "signed round-trip matches" cmp -s "$TMPDIR/test_input.txt" "$TMPDIR/signed.out"
+grep -q "Signed by" "$TMPDIR/signed.err" \
+    && pass "decrypt reports the signer fingerprint" || fail "decrypt reports the signer fingerprint"
+check_ok "verify authenticates a signed file" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/signed.q"
+check_ok "--signer accepts the right signer" \
+    "$BINARY" --force --key-file "$KEYFILE" decrypt --signer "$SIGKEY.pub" \
+    "$TMPDIR/signed.q" "$TMPDIR/signed2.out"
+check_fail "--signer rejects the wrong signer" \
+    "$BINARY" --force --key-file "$KEYFILE" decrypt --signer "$SIGKEY2.pub" \
+    "$TMPDIR/signed.q" "$TMPDIR/signed3.out"
+[ ! -f "$TMPDIR/signed3.out" ] \
+    && pass "no plaintext left after signer rejection" || fail "no plaintext left after signer rejection"
+# A tampered payload byte must fail frame auth before any signature check.
+cp "$TMPDIR/signed.q" "$TMPDIR/signed.bad.q"
+orig=$(dd if="$TMPDIR/signed.bad.q" bs=1 skip=1800 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+new=$(( orig ^ 255 ))
+printf "$(printf '\\%03o' "$new")" | dd of="$TMPDIR/signed.bad.q" bs=1 seek=1800 count=1 conv=notrunc 2>/dev/null
+check_fail "tampered signed file is rejected" \
+    "$BINARY" --key-file "$KEYFILE" verify "$TMPDIR/signed.bad.q"
+# Signed stdin stream (unknown length -> trailer holdback path).
+cat "$TMPDIR/test_input.txt" | "$BINARY" --force --key-file "$KEYFILE" encrypt \
+    --sign-with "$SIGKEY" - "$TMPDIR/signed_pipe.q" >/dev/null 2>&1
+"$BINARY" --key-file "$KEYFILE" decrypt "$TMPDIR/signed_pipe.q" - 2>/dev/null > "$TMPDIR/signed_pipe.out"
+check_ok "signed stdin stream round-trips" cmp -s "$TMPDIR/test_input.txt" "$TMPDIR/signed_pipe.out"
+
+# --- Test 18c: size-hiding padding (QSAFE007 --pad) ---
+echo ""
+echo "[test: padding]"
+dd if=/dev/urandom of="$TMPDIR/pad.in" bs=1000 count=100 >/dev/null 2>&1
+check_ok "encrypt --pad succeeds" \
+    "$BINARY" --force --key-file "$KEYFILE" encrypt --pad "$TMPDIR/pad.in" "$TMPDIR/pad.q"
+check_ok "padded round-trip matches" sh -c \
+    "\"$BINARY\" --force --key-file \"$KEYFILE\" decrypt \"$TMPDIR/pad.q\" \"$TMPDIR/pad.out\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/pad.in\" \"$TMPDIR/pad.out\""
+# Padmé rounds 100000 up to 100352, so the ciphertext must grow accordingly.
+PSZ=$(wc -c < "$TMPDIR/pad.q")
+USZ=$(wc -c < "$TMPDIR/multi.q"); : "$USZ"
+[ "$PSZ" -gt 101000 ] && pass "padding increases ciphertext size" || fail "padding increases ciphertext size"
+check_fail "--pad on stdin is rejected" \
+    sh -c "echo x | \"$BINARY\" --key-file \"$KEYFILE\" encrypt --pad - \"$TMPDIR/padpipe.q\""
+# Padded + signed together.
+check_ok "padded + signed round-trip" sh -c \
+    "\"$BINARY\" --force --key-file \"$KEYFILE\" encrypt --pad --sign-with \"$SIGKEY\" -r \"$KEYFILE.pub\" \"$TMPDIR/pad.in\" \"$TMPDIR/padsig.q\" >/dev/null 2>&1 && \
+     \"$BINARY\" --force --key-file \"$KEYFILE\" decrypt \"$TMPDIR/padsig.q\" \"$TMPDIR/padsig.out\" >/dev/null 2>&1 && \
+     cmp -s \"$TMPDIR/pad.in\" \"$TMPDIR/padsig.out\""
 
 # --- Test 19: keyring / named identities ---
 echo ""

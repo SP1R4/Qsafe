@@ -78,7 +78,9 @@ all: $(EXECUTABLE)
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(EXTRA_CFLAGS) $(OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
-%.o: %.c
+HEADERS = $(wildcard include/*.h)
+
+%.o: %.c $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
 test: $(EXECUTABLE) $(TEST_EXECUTABLE)
