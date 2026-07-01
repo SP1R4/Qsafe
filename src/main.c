@@ -18,6 +18,7 @@
 #include "crypto_utils.h"
 #include "age.h"
 #include "keychain.h"
+#include "sss.h"
 
 #define KEYCHAIN_SERVICE "qsafe"
 
@@ -39,6 +40,8 @@ static void print_usage(void) {
     printf("  %s sign    [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s verify-sig [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s keys    <list|path|import <name> <pubkey>|remove <name>>\n", PROGRAM_NAME);
+    printf("  %s split-key --threshold <t> --shares <n> [prefix]\n", PROGRAM_NAME);
+    printf("  %s join-key <share> <share> [share...]\n", PROGRAM_NAME);
     printf("  %s age-keygen [keyfile]\n", PROGRAM_NAME);
     printf("  %s age-encrypt -r <age1...> <input> [output]\n", PROGRAM_NAME);
     printf("  %s age-decrypt -i <keyfile> <input> [output]\n", PROGRAM_NAME);
@@ -54,6 +57,8 @@ static void print_usage(void) {
     printf("  sign         Create a detached signature for a file\n");
     printf("  verify-sig   Verify a detached signature against a file\n");
     printf("  keys         Manage the keyring (~/.qsafe): list/import/remove recipients\n");
+    printf("  split-key    Split the secret key into n shares, any t of which recover it\n");
+    printf("  join-key     Reconstruct a secret key from shares (re-wraps with a new passphrase)\n");
     printf("  age-keygen   Generate an age (X25519) keypair\n");
     printf("  age-encrypt  Encrypt to age 'age1...' recipients (interop; classical only)\n");
     printf("  age-decrypt  Decrypt an age file with an age identity file (-i)\n");
@@ -73,6 +78,8 @@ static void print_usage(void) {
     printf("  --sign-with <sk>        encrypt: embed an ML-DSA-87 sender signature (needs <sk>.pub)\n");
     printf("  --signer <pk>           decrypt/verify: require the embedded signer to be this key\n");
     printf("  --pad                   encrypt: hide the exact file size (Padme padding)\n");
+    printf("  --threshold <t>         split-key: shares needed to reconstruct (2-16)\n");
+    printf("  --shares <n>            split-key: total shares to create (t-255)\n");
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
     printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS)\n");
@@ -463,10 +470,12 @@ int main(int argc, char *argv[]) {
     const char *cli_passphrase = NULL;
     const char *passphrase_file = NULL;
     const char *sign_with = NULL;       /* encrypt: --sign-with signing secret key */
+    unsigned int sss_threshold = 0;     /* split-key: --threshold */
+    unsigned int sss_shares = 0;        /* split-key: --shares */
     const char *pub_file_opt = NULL;
     const char *identity_name = NULL;
     const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
-    const char *positionals[3] = { NULL, NULL, NULL };
+    const char *positionals[16] = { NULL };  /* join-key takes up to 16 shares */
     int npos = 0;
     int key_file_set = 0;
     const char *recipient_opts[QSAFE_MAX_RECIPIENTS];
@@ -500,6 +509,24 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(a, "--signer") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --signer requires a public key path\n"); return 1; }
             config.signer_pk_file = argv[i];
+        } else if (strcmp(a, "--threshold") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --threshold requires a number\n"); return 1; }
+            char *end = NULL;
+            long v = strtol(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < SSS_MIN_THRESHOLD || v > SSS_MAX_THRESHOLD) {
+                fprintf(stderr, "Error: --threshold must be in [%d, %d]\n", SSS_MIN_THRESHOLD, SSS_MAX_THRESHOLD);
+                return 1;
+            }
+            sss_threshold = (unsigned int)v;
+        } else if (strcmp(a, "--shares") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --shares requires a number\n"); return 1; }
+            char *end = NULL;
+            long v = strtol(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < SSS_MIN_THRESHOLD || v > SSS_MAX_SHARES) {
+                fprintf(stderr, "Error: --shares must be in [%d, %d]\n", SSS_MIN_THRESHOLD, SSS_MAX_SHARES);
+                return 1;
+            }
+            sss_shares = (unsigned int)v;
         } else if (strcmp(a, "--key-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --key-file requires a path\n"); return 1; }
             config.secret_key_file = argv[i];
@@ -545,7 +572,7 @@ int main(int argc, char *argv[]) {
             if (strcmp(a, "version") == 0) { printf("%s %s\n", PROGRAM_NAME, VERSION); return 0; }
             command = a;
         } else {
-            if (npos >= 3) {
+            if (npos >= (int)(sizeof(positionals) / sizeof(positionals[0]))) {
                 fprintf(stderr, "Error: too many arguments\n");
                 return 1;
             }
@@ -568,11 +595,14 @@ int main(int argc, char *argv[]) {
     int is_sign = strcmp(command, "sign") == 0;
     int is_verify_sig = strcmp(command, "verify-sig") == 0;
     int is_keys = strcmp(command, "keys") == 0;
+    int is_split_key = strcmp(command, "split-key") == 0;
+    int is_join_key = strcmp(command, "join-key") == 0;
     int is_age_keygen = strcmp(command, "age-keygen") == 0;
     int is_age_encrypt = strcmp(command, "age-encrypt") == 0;
     int is_age_decrypt = strcmp(command, "age-decrypt") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
         !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys &&
+        !is_split_key && !is_join_key &&
         !is_age_keygen && !is_age_encrypt && !is_age_decrypt) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
@@ -872,6 +902,80 @@ int main(int argc, char *argv[]) {
         }
         fprintf(stderr, "Error: unknown keys subcommand '%s'\n", sub);
         ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
+    }
+
+    /* ---------------- split-key (Shamir shares) ---------------- */
+    if (is_split_key) {
+        if (npos > 1) {
+            fprintf(stderr, "Error: split-key takes at most an output prefix\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (sss_threshold == 0 || sss_shares == 0 || sss_shares < sss_threshold) {
+            fprintf(stderr, "Error: split-key requires --threshold <t> and --shares <n> with n >= t\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 0, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        secret_blob = crypto_load_secret_key(config.secret_key_file, &secret_len, &config);
+        if (!secret_blob) {
+            fprintf(stderr, "Error: could not load secret key (wrong passphrase?)\n");
+            ret = CRYPTO_ERR_FILE_IO;
+            goto cleanup;
+        }
+        const char *prefix = positionals[0] ? positionals[0] : config.secret_key_file;
+        sss_status src = sss_split_to_files(secret_blob, secret_len,
+                                            sss_threshold, sss_shares, prefix);
+        if (src != SSS_OK) {
+            fprintf(stderr, "Error: split-key failed: %s\n", sss_strerror(src));
+            ret = CRYPTO_ERR_CRYPTO;
+            goto cleanup;
+        }
+        printf("Split %s into %u shares (any %u reconstruct it):\n",
+               config.secret_key_file, sss_shares, sss_threshold);
+        for (unsigned int i = 1; i <= sss_shares; i++) {
+            printf("  %s.share%u\n", prefix, i);
+        }
+        printf("Each share is UNENCRYPTED key material: store them separately\n");
+        printf("(any %u of them recover the key without a passphrase).\n", sss_threshold);
+        ret = CRYPTO_SUCCESS;
+        goto cleanup;
+    }
+
+    /* ---------------- join-key (reconstruct from shares) ---------------- */
+    if (is_join_key) {
+        if (npos < SSS_MIN_THRESHOLD) {
+            fprintf(stderr, "Error: join-key needs at least %d share files\n", SSS_MIN_THRESHOLD);
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        unsigned char *joined = NULL;
+        size_t joined_len = 0;
+        sss_status src = sss_join_files(positionals, (size_t)npos, &joined, &joined_len);
+        if (src != SSS_OK) {
+            fprintf(stderr, "Error: join-key failed: %s\n", sss_strerror(src));
+            ret = CRYPTO_ERR_CRYPTO;
+            goto cleanup;
+        }
+        secret_blob = joined;   /* cleansed+freed in cleanup */
+        secret_len = joined_len;
+        /* Re-wrap under a freshly confirmed passphrase (like keygen). */
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 1, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (crypto_save_secret_key(config.secret_key_file, secret_blob, secret_len, &config) != CRYPTO_SUCCESS) {
+            fprintf(stderr, "Error: failed to write reconstructed secret key\n");
+            ret = CRYPTO_ERR_FILE_IO;
+            goto cleanup;
+        }
+        printf("Reconstructed secret key -> %s (wrapped under the new passphrase)\n",
+               config.secret_key_file);
+        ret = CRYPTO_SUCCESS;
+        goto cleanup;
     }
 
     /* ---------------- rekey ---------------- */

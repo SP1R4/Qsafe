@@ -449,6 +449,37 @@ check_ok "padded + signed round-trip" sh -c \
      \"$BINARY\" --force --key-file \"$KEYFILE\" decrypt \"$TMPDIR/padsig.q\" \"$TMPDIR/padsig.out\" >/dev/null 2>&1 && \
      cmp -s \"$TMPDIR/pad.in\" \"$TMPDIR/padsig.out\""
 
+# --- Test 18d: Shamir key splitting (split-key / join-key) ---
+echo ""
+echo "[test: split-key / join-key]"
+check_ok "split-key 2-of-3 succeeds" \
+    "$BINARY" --key-file "$KEYFILE" split-key --threshold 2 --shares 3 "$TMPDIR/kshare"
+[ -f "$TMPDIR/kshare.share1" ] && [ -f "$TMPDIR/kshare.share3" ] \
+    && pass "share files are created" || fail "share files are created"
+check_ok "join-key from shares 1+3 succeeds" \
+    env QSAFE_PASSPHRASE="rejoined-pass" "$BINARY" --force --key-file "$TMPDIR/rejoined_key.bin" \
+    join-key "$TMPDIR/kshare.share1" "$TMPDIR/kshare.share3"
+env QSAFE_PASSPHRASE="rejoined-pass" "$BINARY" --force --key-file "$TMPDIR/rejoined_key.bin" \
+    decrypt "$TMPDIR/test_input.enc" "$TMPDIR/rejoined.out" >/dev/null 2>&1
+check_ok "reconstructed key decrypts existing files" \
+    cmp -s "$TMPDIR/test_input.txt" "$TMPDIR/rejoined.out"
+check_fail "join-key with one share is rejected" \
+    env QSAFE_PASSPHRASE="x" "$BINARY" --force --key-file "$TMPDIR/r2.bin" \
+    join-key "$TMPDIR/kshare.share1"
+# Shares from different splits must not combine.
+"$BINARY" --key-file "$KEYFILE" split-key --threshold 2 --shares 2 "$TMPDIR/othershare" >/dev/null 2>&1
+check_fail "shares from different sets are rejected" \
+    env QSAFE_PASSPHRASE="x" "$BINARY" --force --key-file "$TMPDIR/r3.bin" \
+    join-key "$TMPDIR/kshare.share1" "$TMPDIR/othershare.share2"
+# A corrupted share must fail the reconstruction digest.
+cp "$TMPDIR/kshare.share2" "$TMPDIR/kshare.bad"
+orig=$(dd if="$TMPDIR/kshare.bad" bs=1 skip=100 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+new=$(( orig ^ 255 ))
+printf "$(printf '\\%03o' "$new")" | dd of="$TMPDIR/kshare.bad" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+check_fail "corrupt share is rejected" \
+    env QSAFE_PASSPHRASE="x" "$BINARY" --force --key-file "$TMPDIR/r4.bin" \
+    join-key "$TMPDIR/kshare.share1" "$TMPDIR/kshare.bad"
+
 # --- Test 19: keyring / named identities ---
 echo ""
 echo "[test: keyring]"
