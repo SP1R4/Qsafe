@@ -107,6 +107,18 @@ $(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -fPIC -shared $^ -o $@ \
 		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
+# --- Constant-time check (Linux + valgrind) -----------------------------------
+# ctgrind-style harness: secrets are marked uninitialized and valgrind flags
+# any branch/index that depends on them. Run: make ct && valgrind
+# --error-exitcode=1 tests/ct_check
+CT_EXECUTABLE = $(TEST_DIR)/ct_check$(EXEEXT)
+
+ct: $(CT_EXECUTABLE)
+
+$(CT_EXECUTABLE): $(TEST_DIR)/ct_check.c $(SRC_DIR)/crypto_utils.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(TEST_DIR)/ct_check.c $(SRC_DIR)/crypto_utils.o \
+		-o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
 # --- Fuzzing (requires clang + libFuzzer) -------------------------------------
 # Builds an instrumented harness over the untrusted-input parsers. Run with:
 #   tests/fuzz_decrypt -max_len=8192 corpus/
@@ -146,6 +158,6 @@ uninstall:
 	rm -f $(DESTDIR)$(ZSHCOMPDIR)/_qsafe
 
 clean:
-	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY) $(PLUGIN) $(SRC_DIR)/age_plugin.o
+	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY) $(PLUGIN) $(SRC_DIR)/age_plugin.o $(CT_EXECUTABLE)
 
-.PHONY: all test lib plugin fuzz install install-completions uninstall clean
+.PHONY: all test lib plugin ct fuzz install install-completions uninstall clean

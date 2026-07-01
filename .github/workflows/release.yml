@@ -11,7 +11,8 @@ on:
 
 permissions:
   contents: write
-  id-token: write   # keyless cosign signing via OIDC
+  id-token: write      # keyless cosign signing via OIDC
+  attestations: write  # SLSA build provenance (gh attestation verify)
 
 jobs:
   build:
@@ -66,7 +67,7 @@ jobs:
         run: |
           NAME="qsafe-${GITHUB_REF_NAME}-$(uname -s)-$(uname -m)"
           mkdir -p "dist/$NAME"
-          cp qsafe README.md LICENSE CHANGELOG.md "dist/$NAME/"
+          cp qsafe age-plugin-qsafe README.md LICENSE CHANGELOG.md "dist/$NAME/"
           cp docs/qsafe.1 "dist/$NAME/" || true
           tar -C dist -czf "$NAME.tar.gz" "$NAME"
           shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
@@ -81,6 +82,14 @@ jobs:
             # needs no pre-shared key (see README "Verifying releases").
             cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
           done
+
+      # SLSA build provenance: a signed attestation binding the artifact to
+      # this workflow, commit, and builder. Verify with:
+      #   gh attestation verify qsafe-*.tar.gz --repo <owner>/Qsafe
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "*.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -141,10 +150,10 @@ jobs:
         run: |
           NAME="qsafe-${GITHUB_REF_NAME}-Windows-x86_64"
           mkdir -p "dist/$NAME"
-          cp qsafe.exe README.md LICENSE CHANGELOG.md "dist/$NAME/"
+          cp qsafe.exe age-plugin-qsafe.exe README.md LICENSE CHANGELOG.md "dist/$NAME/"
           cp docs/qsafe.1 "dist/$NAME/" || true
           # Bundle the MinGW runtime DLLs so the archive runs without MSYS2.
-          ldd qsafe.exe | grep -i '/mingw64/' | awk '{print $3}' | sort -u | while read -r dll; do
+          ldd qsafe.exe age-plugin-qsafe.exe | grep -i '/mingw64/' | awk '{print $3}' | sort -u | while read -r dll; do
             [ -f "$dll" ] && cp "$dll" "dist/$NAME/"
           done
           tar -C dist -czf "$NAME.tar.gz" "$NAME"
@@ -158,6 +167,11 @@ jobs:
           for f in *.tar.gz; do
             cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
           done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "*.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

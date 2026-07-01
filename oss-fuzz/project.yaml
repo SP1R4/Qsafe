@@ -1,0 +1,18 @@
+# OSS-Fuzz project configuration for Qsafe.
+#
+# These files mirror what gets submitted to github.com/google/oss-fuzz under
+# projects/qsafe/ — see oss-fuzz/README.md for the enrollment steps. Keeping
+# them here lets the build be tested locally with the OSS-Fuzz helper:
+#
+#   python infra/helper.py build_fuzzers --external /path/to/Qsafe
+
+homepage: "https://github.com/SP1R4/Qsafe"
+language: c
+primary_contact: "sp1r4.work@gmail.com"
+main_repo: "https://github.com/SP1R4/Qsafe.git"
+sanitizers:
+  - address
+  - undefined
+  - memory
+fuzzing_engines:
+  - libfuzzer
