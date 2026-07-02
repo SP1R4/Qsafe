@@ -6,7 +6,11 @@ name: Supply chain
 
 on:
   push:
+    branches: [master]
   pull_request:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, for the deep constant-time sweep
+  workflow_dispatch:
 
 jobs:
   reproducible:
@@ -49,25 +53,32 @@ jobs:
 
       - name: Build twice, compare hashes
         run: |
+          # Both builds MUST use identical flags — build the default target the
+          # same way each time (a flag difference here would be measuring the
+          # flags, not reproducibility).
           export SOURCE_DATE_EPOCH=0
-          make CPPFLAGS="-Iinclude" 2>/dev/null || make
+          make clean && make
           sha256sum qsafe age-plugin-qsafe > first.sha256
           cat first.sha256
-          make clean
-          make
+          make clean && make
           sha256sum qsafe age-plugin-qsafe > second.sha256
           cat second.sha256
-          diff first.sha256 second.sha256 \
-            && echo "Build is reproducible" \
-            || { echo "::error::binaries differ between identical builds"; exit 1; }
+          if diff first.sha256 second.sha256; then
+            echo "Build is reproducible"
+          else
+            echo "::error::binaries differ between identical builds"
+            exit 1
+          fi
 
   constant-time:
     name: Constant-time check (ctgrind)
     runs-on: ubuntu-latest
-    # Advisory until a clean baseline is established across the OpenSSL and
-    # liboqs versions CI pins; flip to enforcing once it has run green for a
-    # while. A failure here means valgrind saw a branch or memory index that
-    # depends on secret data.
+    # Deep, advisory check: valgrind over code that calls OpenSSL/liboqs needs a
+    # curated suppressions file to filter those libraries' own vectorized-asm
+    # false positives before it can run green. Until that baseline exists it is
+    # NOT a per-PR gate — it runs on the weekly schedule and on demand
+    # (workflow_dispatch), where the output is reviewed by a human.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     continue-on-error: true
     steps:
       - name: Checkout
