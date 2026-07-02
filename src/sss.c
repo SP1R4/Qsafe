@@ -5,6 +5,10 @@
  * and joining are interactive, offline recovery operations, not per-message
  * hot paths, so key-independent timing is not a design goal here. */
 
+/* Expose POSIX symbols (mode_t, PATH_MAX, chmod via platform.h) under -std=c11,
+ * which otherwise restricts glibc to strict ISO C. Must precede all includes. */
+#define _DEFAULT_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
