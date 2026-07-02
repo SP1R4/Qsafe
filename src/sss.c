@@ -11,6 +11,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
+#include "platform.h"
 #include "sss.h"
 
 /* --- GF(256) --- */
@@ -134,6 +135,8 @@ sss_status sss_split_to_files(const unsigned char *secret, size_t secret_len,
             goto done;
         }
         fclose(f); f = NULL;
+        /* A share is unwrapped key material: owner-only, like a secret key. */
+        qsafe_chmod_private(path);
     }
     ret = SSS_OK;
 

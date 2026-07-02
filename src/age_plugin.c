@@ -207,6 +207,7 @@ static const char B64_CHARSET[] =
 static size_t b64_encode(const unsigned char *in, size_t inlen, char *out) {
     size_t n = 0;
     size_t i = 0;
+    if (inlen == 0 || !in) { out[0] = '\0'; return 0; }  /* empty body (e.g. "done") */
     while (i + 3 <= inlen) {
         uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
         out[n++] = B64_CHARSET[(v >> 18) & 63];
@@ -263,10 +264,14 @@ typedef struct {
     int nargs;
     unsigned char body[8192];
     size_t body_len;
+    int body_ok;   /* 0 when the body was oversized or invalid base64 */
 } stanza_t;
 
 /* Reads one "-> verb args" command plus its base64 body. Returns 1 on
- * success, 0 on EOF/parse error. */
+ * success, 0 on EOF/framing error. A body that is oversized or not canonical
+ * base64 does NOT fail the read — foreign plugins' stanzas travel on the same
+ * stream and must be skippable — it just clears body_ok; callers require
+ * body_ok for the stanzas they actually consume. */
 static int read_stanza(stanza_t *st) {
     static char line[LINE_MAX_LEN];
     if (!fgets(line, sizeof(line), stdin)) return 0;
@@ -276,6 +281,7 @@ static int read_stanza(stanza_t *st) {
 
     st->nargs = 0;
     st->body_len = 0;
+    st->body_ok = 1;
     char *tok = line + 3;
     char *sp = strchr(tok, ' ');
     size_t vlen = sp ? (size_t)(sp - tok) : strlen(tok);
@@ -292,21 +298,30 @@ static int read_stanza(stanza_t *st) {
         st->nargs++;
     }
 
-    /* Body: base64 lines wrapped at 64 columns; a short line terminates. */
+    /* Body: base64 lines wrapped at 64 columns; a short line terminates. All
+     * lines are consumed even when the body overflows our buffer. */
     char b64[12288];
     size_t b64len = 0;
     for (;;) {
         if (!fgets(line, sizeof(line), stdin)) return 0;
         l = strlen(line);
         while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = '\0';
-        if (b64len + l >= sizeof(b64)) return 0;
-        memcpy(b64 + b64len, line, l);
-        b64len += l;
+        if (b64len + l >= sizeof(b64)) {
+            st->body_ok = 0;   /* too big for us; keep consuming its lines */
+        } else {
+            memcpy(b64 + b64len, line, l);
+            b64len += l;
+        }
         if (l < 64) break;
     }
-    int n = b64_decode(b64, b64len, st->body, sizeof(st->body));
-    if (n < 0) return 0;
-    st->body_len = (size_t)n;
+    if (st->body_ok) {
+        int n = b64_decode(b64, b64len, st->body, sizeof(st->body));
+        if (n < 0) {
+            st->body_ok = 0;
+        } else {
+            st->body_len = (size_t)n;
+        }
+    }
     return 1;
 }
 
@@ -472,7 +487,7 @@ static int run_recipient_v1(void) {
             }
             OPENSSL_cleanse(payload, sizeof(payload));
         } else if (strcmp(st.verb, "wrap-file-key") == 0) {
-            if (st.body_len == AGE_FILE_KEY_SIZE && n_file_keys < MAX_FILE_KEYS) {
+            if (st.body_ok && st.body_len == AGE_FILE_KEY_SIZE && n_file_keys < MAX_FILE_KEYS) {
                 memcpy(file_keys[n_file_keys++], st.body, AGE_FILE_KEY_SIZE);
             }
         }
@@ -526,7 +541,6 @@ static int run_identity_v1(void) {
     static unsigned char identities[MAX_IDENTITIES][SEC_BLOB_SIZE];
     static wrapped_t wrapped[MAX_STANZAS];
     size_t n_identities = 0, n_wrapped = 0;
-    size_t max_file = 0;
     int bad_identity = -1;
     stanza_t st;
 
@@ -547,14 +561,16 @@ static int run_identity_v1(void) {
             }
             OPENSSL_cleanse(payload, sizeof(payload));
         } else if (strcmp(st.verb, "recipient-stanza") == 0 && st.nargs >= 2) {
-            /* args: <file index> <tag> [stanza args...] */
-            if (strcmp(st.args[1], STANZA_TAG) == 0 &&
-                st.body_len == REC_BODY_SIZE && n_wrapped < MAX_STANZAS) {
-                wrapped[n_wrapped].file_index = (size_t)strtoul(st.args[0], NULL, 10);
+            /* args: <file index> <tag> [stanza args...]. The file index is
+             * untrusted input: parse strictly and bound it (a real invocation
+             * never has more files than stanzas we can hold). */
+            char *end = NULL;
+            unsigned long fi = strtoul(st.args[0], &end, 10);
+            if (strcmp(st.args[1], STANZA_TAG) == 0 && st.body_ok &&
+                st.body_len == REC_BODY_SIZE && n_wrapped < MAX_STANZAS &&
+                end != st.args[0] && *end == '\0' && fi < MAX_STANZAS) {
+                wrapped[n_wrapped].file_index = (size_t)fi;
                 memcpy(wrapped[n_wrapped].body, st.body, REC_BODY_SIZE);
-                if (wrapped[n_wrapped].file_index + 1 > max_file) {
-                    max_file = wrapped[n_wrapped].file_index + 1;
-                }
                 n_wrapped++;
             }
         }
@@ -569,19 +585,23 @@ static int run_identity_v1(void) {
         return 0;
     }
 
-    for (size_t f = 0; f < max_file; f++) {
+    /* Serve each distinct file index exactly once, iterating only over the
+     * stanzas actually received (indices are attacker-controlled; never loop
+     * over their numeric range). */
+    unsigned char served[MAX_STANZAS] = { 0 };
+    for (size_t w = 0; w < n_wrapped; w++) {
+        size_t f = wrapped[w].file_index;
+        if (served[f]) continue;
         unsigned char fk[AGE_FILE_KEY_SIZE];
         int got = 0;
-        for (size_t w = 0; w < n_wrapped && !got; w++) {
-            if (wrapped[w].file_index != f) continue;
-            for (size_t i = 0; i < n_identities && !got; i++) {
-                if (crypto_hybrid_unwrap(kem, identities[i], AGE_HKDF_LABEL,
-                                         wrapped[w].body, AGE_FILE_KEY_SIZE, fk)) {
-                    got = 1;
-                }
+        for (size_t i = 0; i < n_identities && !got; i++) {
+            if (crypto_hybrid_unwrap(kem, identities[i], AGE_HKDF_LABEL,
+                                     wrapped[w].body, AGE_FILE_KEY_SIZE, fk)) {
+                got = 1;
             }
         }
         if (got) {
+            served[f] = 1;
             char verb[64];
             snprintf(verb, sizeof(verb), "file-key %zu", f);
             send_and_ack(verb, fk, AGE_FILE_KEY_SIZE);

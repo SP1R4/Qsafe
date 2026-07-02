@@ -457,6 +457,7 @@ crypto_error_t crypto_save_public_key(const char *filename, const unsigned char 
 unsigned char *crypto_load_public_key(const char *filename, size_t expected_length, const crypto_config_t *config) {
     (void)config;
 
+    if (!filename) return NULL;   /* public API: never fopen(NULL) */
     FILE *file = fopen(filename, "rb");
     if (!file) {
         perror("Error opening public key file");
@@ -966,6 +967,13 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
 
     if (n_recipients == 0 || n_recipients > QSAFE_MAX_RECIPIENTS) {
         fprintf(stderr, "Error: recipient count must be between 1 and %d\n", QSAFE_MAX_RECIPIENTS);
+        return CRYPTO_ERR_INVALID_INPUT;
+    }
+
+    /* Signing needs both the signing secret key and the signer public key to
+     * embed. main.c always supplies both, but the engine is a public API. */
+    if (signing && !config->sign_pk_file) {
+        fprintf(stderr, "Error: --sign-with requires a signer public key\n");
         return CRYPTO_ERR_INVALID_INPUT;
     }
 

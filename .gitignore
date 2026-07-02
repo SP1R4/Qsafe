@@ -3,7 +3,10 @@
 crypto
 crypto-v2
 qsafe
+age-plugin-qsafe
+age-plugin-qsafe.exe
 tests/test_crypto
+tests/ct_check
 tests/fuzz_decrypt
 *.dSYM/
 corpus/

@@ -461,6 +461,41 @@ check_ok "padded + signed round-trip" sh -c \
      \"$BINARY\" --force --key-file \"$KEYFILE\" decrypt \"$TMPDIR/padsig.q\" \"$TMPDIR/padsig.out\" >/dev/null 2>&1 && \
      cmp -s \"$TMPDIR/pad.in\" \"$TMPDIR/padsig.out\""
 
+# --- Test 18c2: adversarial QSAFE007 files (malicious encryptor) ---
+# Frozen fixtures with VALID recipient wraps and VALID frame AEAD but hostile
+# payload declarations (signed-but-no-trailer, pad-flag mismatches, length
+# over/under-runs, bad signature lengths, huge declared lengths). Each MUST be
+# rejected and leave no plaintext; case 11 is a well-formed control.
+echo ""
+echo "[test: adversarial QSAFE007]"
+EVIL="$PROJECT_DIR/tests/fixtures/evil"
+if [ -f "$EVIL/case_1.qsafe" ]; then
+    for c in 1 2 3 4 5 6 7 8 9 10; do
+        rm -f "$TMPDIR/evil_$c.out"
+        check_fail "malicious case $c is rejected" \
+            env QSAFE_PASSPHRASE="evil-fixture-pass" "$BINARY" --force \
+            --key-file "$EVIL/key" decrypt "$EVIL/case_$c.qsafe" "$TMPDIR/evil_$c.out"
+        [ ! -f "$TMPDIR/evil_$c.out" ] \
+            && pass "malicious case $c leaves no plaintext" \
+            || fail "malicious case $c leaves no plaintext"
+    done
+    # Control: the well-formed file MUST decrypt.
+    rm -f "$TMPDIR/evil_ctrl.out"
+    env QSAFE_PASSPHRASE="evil-fixture-pass" "$BINARY" --force \
+        --key-file "$EVIL/key" decrypt "$EVIL/case_11.qsafe" "$TMPDIR/evil_ctrl.out" >/dev/null 2>&1
+    if grep -q "adversarial payload" "$TMPDIR/evil_ctrl.out" 2>/dev/null; then
+        pass "adversarial control file decrypts"
+    else
+        # the crafted metadata sets mode 000; read via a copy the test owns
+        chmod u+r "$TMPDIR/evil_ctrl.out" 2>/dev/null
+        grep -q "adversarial payload" "$TMPDIR/evil_ctrl.out" 2>/dev/null \
+            && pass "adversarial control file decrypts" \
+            || fail "adversarial control file decrypts"
+    fi
+else
+    pass "adversarial QSAFE007 fixtures skipped (not present)"
+fi
+
 # --- Test 18d: Shamir key splitting (split-key / join-key) ---
 echo ""
 echo "[test: split-key / join-key]"
