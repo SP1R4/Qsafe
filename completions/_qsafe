@@ -15,6 +15,12 @@ _qsafe() {
         'sign-keygen:Generate an ML-DSA-87 signing keypair'
         'sign:Create a detached signature for a file'
         'verify-sig:Verify a detached signature against a file'
+        'keys:Manage the keyring (list/path/import/remove)'
+        'split-key:Split the secret key into Shamir shares'
+        'join-key:Reconstruct a secret key from shares'
+        'age-keygen:Generate an age (X25519) keypair'
+        'age-encrypt:Encrypt to age recipients (classical interop)'
+        'age-decrypt:Decrypt an age file'
         'help:Show usage'
         'version:Show version'
     )
@@ -27,6 +33,14 @@ _qsafe() {
         '--passphrase-file[Read passphrase from file]:file:_files' \
         '--check[Authenticate only; write nothing]' \
         '--armor[Base64 text input/output]' \
+        '--sign-with[Embed an ML-DSA-87 sender signature]:signing key:_files' \
+        '--signer[Require this embedded signer key]:public key:_files' \
+        '--pad[Hide the exact file size (Padmé padding)]' \
+        '--threshold[split-key: shares needed to reconstruct]:threshold:(2 3 4 5)' \
+        '--shares[split-key: total shares to create]:shares:(3 4 5 6 7)' \
+        '--identity[Keyring identity name]:name:' \
+        '*'{-i,--identity-file}'[age identity file]:file:_files' \
+        '--keychain[Store/derive the passphrase in the OS keychain]' \
         '--scrypt-cost[scrypt cost log2(N)]:cost:(14 15 16 17 18 19 20 21 22)' \
         '--verbose[Verbose output]' \
         '--force[Overwrite without prompting]' \

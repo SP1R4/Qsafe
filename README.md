@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-7.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-8.0.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/NIST-FIPS%20203-orange" alt="NIST FIPS 203">
   <img src="https://img.shields.io/badge/language-C-lightgrey" alt="C">
@@ -28,6 +28,10 @@ Qsafe follows a true public-key workflow: you generate a keypair **once** with `
 
 - **Hybrid quantum-resistant** — X25519 + ML-KEM-1024 (NIST FIPS 203, Level 5); break-one-stay-secure
 - **Multi-recipient** — encrypt once to several public keys (`-r`); any one secret key decrypts
+- **Embedded sender authentication** — `encrypt --sign-with` seals an ML-DSA-87 signature *inside* the ciphertext; decrypt verifies it automatically and `--signer` pins the expected sender
+- **Size-hiding padding** — `encrypt --pad` rounds the ciphertext to a Padmé bucket so its length reveals only a coarse size class
+- **Shamir key recovery** — `split-key` / `join-key`: split the secret key into n shares, any t of which recover it (lost-passphrase insurance)
+- **age ecosystem plugin** — `age-plugin-qsafe` gives every age client (`age`, `rage`, `sops`, `passage`, …) post-quantum `age1qsafe1…` recipients
 - **Detached signatures** — `sign` / `verify-sig` using ML-DSA-87 for sender authenticity
 - **Durable public-key workflow** — generate a keypair once; encrypt with the public key, decrypt with the secret key. Encrypting never overwrites your keys.
 - **Authenticated encryption** — AES-256-GCM provides confidentiality *and* integrity; the entire header (magic, recipient records, nonce) is authenticated as additional data (AAD)
@@ -255,11 +259,17 @@ shasum -a 256 -c qsafe-v7.0.0-Linux-x86_64.tar.gz.sha256
 
 # Signature
 cosign verify-blob \
-  --bundle qsafe-v7.0.0-Linux-x86_64.tar.gz.cosign.bundle \
+  --bundle qsafe-v8.0.0-Linux-x86_64.tar.gz.cosign.bundle \
   --certificate-identity-regexp "https://github.com/SP1R4/Qsafe/.github/workflows/release.yml@.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  qsafe-v7.0.0-Linux-x86_64.tar.gz
+  qsafe-v8.0.0-Linux-x86_64.tar.gz
+
+# SLSA build provenance (which workflow, commit, and builder produced it)
+gh attestation verify qsafe-v8.0.0-Linux-x86_64.tar.gz --repo SP1R4/Qsafe
 ```
+
+Releases are also checked by a reproducible-build CI gate: building the same
+source twice must produce byte-identical binaries.
 
 ### Verify Installation
 
@@ -283,6 +293,8 @@ qsafe inspect     <file>
 qsafe sign-keygen [options]
 qsafe sign        [options] <input> [signature]
 qsafe verify-sig  [options] <input> [signature]
+qsafe split-key   --threshold <t> --shares <n> [prefix]
+qsafe join-key    <share> <share> [share...]
 ```
 
 Files and directories are detected automatically — there is no `file|dir`
@@ -303,6 +315,8 @@ input or output to read from stdin / write to stdout.
 | `sign-keygen` | Generate an ML-DSA-87 signing keypair (default `sign_key.bin`). |
 | `sign` | Create a detached signature for a file (default `<input>.sig`). |
 | `verify-sig` | Verify a detached signature against a file. |
+| `split-key` | Split the secret key into n Shamir shares, any t of which recover it. |
+| `join-key` | Reconstruct a secret key from shares and re-wrap it under a new passphrase. |
 
 ### Options
 
@@ -314,6 +328,10 @@ input or output to read from stdin / write to stdout.
 | `--passphrase <str>` | Passphrase (discouraged — visible to other users) |
 | `--passphrase-file <path>` | Read the passphrase from the first line of a file |
 | `--check` | decrypt/verify: authenticate only, write nothing |
+| `--sign-with <sk>` | encrypt: embed an ML-DSA-87 sender signature (verified on decrypt) |
+| `--signer <pk>` | decrypt/verify: require the embedded signer to be this key |
+| `--pad` | encrypt: hide the exact file size (Padmé padding) |
+| `--threshold <t>` / `--shares <n>` | split-key: t-of-n share parameters |
 | `--armor` | encrypt: ASCII base64 output; decrypt: base64 input |
 | `--scrypt-cost <n>` | keygen/rekey: scrypt cost as log2(N), 14–22 (default 15) |
 | `--verbose` | Print detailed information |
@@ -369,6 +387,34 @@ qsafe --key-file project.key encrypt data.csv
 qsafe --key-file project.key decrypt data.csv.qsafe
 ```
 
+**Authenticated sender (embedded signature):**
+
+```bash
+qsafe sign-keygen                                   # once: sign_key.bin(.pub)
+qsafe encrypt --sign-with sign_key.bin -r alice.pub report.pdf
+# Alice's decrypt automatically verifies and prints the signer fingerprint;
+# she can also pin who she expects:
+qsafe decrypt --signer yours.pub report.pdf.qsafe
+```
+
+**Hide the file size (Padmé padding):**
+
+```bash
+qsafe encrypt --pad medical_record.pdf    # ciphertext length reveals only a bucket
+```
+
+**Split the key for recovery (2-of-3 Shamir shares):**
+
+```bash
+qsafe split-key --threshold 2 --shares 3 backup     # -> backup.share1..3
+# … passphrase lost years later; any two shares rebuild the key:
+qsafe join-key backup.share1 backup.share3 --key-file recovered.bin
+```
+
+> Each share file is unencrypted key material — store them in separate places
+> (safe deposit box, trusted friend, …). Any two of them recover the key
+> *without* a passphrase; one alone reveals nothing.
+
 > **Note:** passing `--passphrase` on the command line exposes it to other users
 > via the process list and your shell history. Prefer the interactive prompt,
 > `$QSAFE_PASSPHRASE`, or `--passphrase-file`.
@@ -380,7 +426,9 @@ qsafe --key-file project.key decrypt data.csv.qsafe
 Qsafe is also a library, so you can embed it instead of shelling out.
 
 ```bash
-make lib        # -> libqsafe.so / libqsafe.dylib / libqsafe.dll
+pip install qsafe    # wheels bundle libqsafe — no C toolchain needed
+# or, from a checkout:
+make lib             # -> libqsafe.so / libqsafe.dylib / libqsafe.dll
 ```
 
 The C API is in [`include/libqsafe.h`](include/libqsafe.h) (`qsafe_keygen`,
@@ -413,7 +461,26 @@ qsafe age-decrypt -i key.txt   report.pdf.age report.pdf
 
 > **No post-quantum protection here.** age v1 is a *classical* X25519 format.
 > These commands exist for ecosystem compatibility; for quantum-resistant
-> encryption use Qsafe's native `encrypt`/`decrypt` (X25519 + ML-KEM-1024).
+> encryption use Qsafe's native `encrypt`/`decrypt` (X25519 + ML-KEM-1024) —
+> or the plugin below, which brings the hybrid scheme *into* age.
+
+### Post-quantum age recipients (`age-plugin-qsafe`)
+
+The other direction of interop: `age-plugin-qsafe` implements the
+[age plugin protocol](https://github.com/C2SP/C2SP/blob/main/age-plugin.md),
+so any age client can encrypt to a hybrid X25519 + ML-KEM-1024 identity —
+including tools built on age such as `sops` and `passage`:
+
+```bash
+age-plugin-qsafe --keygen -o key.txt     # prints an age1qsafe1… recipient
+age -r age1qsafe1...  -o report.age report.pdf     # any age client
+age -d -i key.txt report.age                       # plugin invoked automatically
+```
+
+The stanza wraps age's file key with the same hybrid construction as native
+Qsafe files (distinct HKDF label), so age files gain the break-one-stay-secure
+property. The plugin binary just needs to be on `$PATH`; `make install` puts
+it next to `qsafe`.
 
 ---
 
@@ -428,11 +495,14 @@ qsafe keygen  --keychain               # generates a random passphrase, stores i
 qsafe decrypt --keychain report.q out  # retrieves it automatically — no prompt
 ```
 
+On Windows the backend is **DPAPI**: the passphrase is sealed to your Windows
+logon credential (`CryptProtectData`) and stored under `%APPDATA%\qsafe\`.
+
 The keychain item is keyed by the secret-key file path (service `qsafe`). On
-non-macOS platforms `--keychain` reports that it is unsupported; Linux
-(libsecret) and Windows (DPAPI / Credential Manager) backends are planned. The
-on-disk secret key remains scrypt-wrapped either way — `--keychain` only changes
-*where the wrapping passphrase comes from*.
+Linux `--keychain` reports that it is unsupported (libsecret is the natural
+backend; contributions welcome). The on-disk secret key remains scrypt-wrapped
+either way — `--keychain` only changes *where the wrapping passphrase comes
+from*.
 
 ---
 
@@ -444,14 +514,14 @@ on-disk secret key remains scrypt-wrapped either way — `--keychain` only chang
 
 ### Encrypted File
 
-`qsafe encrypt` writes the framed **QSAFE006** format; `qsafe decrypt` also
-reads the legacy **QSAFE005** format. The full byte-level spec for both is in
-[docs/FORMAT.md](docs/FORMAT.md).
+`qsafe encrypt` writes the framed **QSAFE007** format; `qsafe decrypt` also
+reads the legacy **QSAFE006** and **QSAFE005** formats. The full byte-level
+spec — now frozen, with test vectors — is in [docs/FORMAT.md](docs/FORMAT.md).
 
 ```
 Offset       Size          Field
 -----------  ------------  ----------------------------
-0x0000       8 bytes       Version header ("QSAFE006")
+0x0000       8 bytes       Version header ("QSAFE007")
 0x0008       1 byte        recipient count (1..16)
 0x0009       N * 1660      recipient records (see below)
 ...          variable      frame[0..k-1]: each is ciphertext ‖ 16-byte tag
@@ -467,7 +537,8 @@ wrapped content key (CEK)     32 bytes
 CEK wrap tag                  16 bytes
 ```
 
-The payload (a 272-byte metadata block followed by the file contents) is
+The payload — a 288-byte metadata block, the file contents, then an optional
+embedded-signature trailer and optional padding — is
 encrypted as a sequence of **64 KiB frames**, each its own AES-256-GCM segment
 keyed by a random per-file content key. The header (magic, recipient count, and
 every record) is authenticated as additional data on the first frame; each
@@ -602,7 +673,7 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the complete list. The most important
 
 - **Metadata leakage:** Qsafe does not pad, so the approximate plaintext size and the recipient *count* are visible. The filename, mode, and mtime are encrypted.
 - **No forward secrecy for long-term keys:** if a secret key (and passphrase) are later compromised, all past files encrypted to it can be decrypted.
-- **Streaming and authentication:** QSAFE006 is framed — the payload is a sequence of 64 KiB frames, each authenticated independently, so every frame's plaintext is released only after that frame verifies, in constant memory for both files and pipes. Caveat: for a multi-frame file, earlier (authenticated) frames are released before a later corrupt frame is detected, so a verified *prefix* may already be emitted on failure — check the exit code. (Legacy QSAFE005 files buffer the whole pipe payload instead.)
+- **Streaming and authentication:** QSAFE007/QSAFE006 are framed — the payload is a sequence of 64 KiB frames, each authenticated independently, so every frame's plaintext is released only after that frame verifies, in constant memory for both files and pipes. Caveat: for a multi-frame file, earlier (authenticated) frames are released before a later corrupt frame is detected, so a verified *prefix* may already be emitted on failure — check the exit code. (Legacy QSAFE005 files buffer the whole pipe payload instead.)
 - **`--passphrase` on the CLI** is visible in the process list / shell history; prefer the prompt, `$QSAFE_PASSPHRASE`, or `--passphrase-file`.
 
 ---
@@ -649,11 +720,15 @@ wrong-passphrase rejection, and tamper detection.
 
 ## Compatibility
 
-Qsafe 6.0 changes the default encrypted-file format to the framed **QSAFE006**
-(see [docs/FORMAT.md](docs/FORMAT.md)). This is **not** a breaking change for
-reading: `decrypt` accepts both QSAFE006 and QSAFE005, so files produced by 5.0
-still open. `encrypt` now writes QSAFE006, which 5.x builds cannot read — re-cut
-any ciphertext you need older builds to open. Keys are unchanged across 5.x→6.0.
+Qsafe 8.0 changes the default encrypted-file format to **QSAFE007** (a
+16-byte-larger encrypted metadata block enabling embedded sender signatures
+and size-hiding padding; see [docs/FORMAT.md](docs/FORMAT.md), now frozen).
+Reading is unaffected: `decrypt` accepts QSAFE007, QSAFE006, and QSAFE005 —
+CI pins fixtures for all three. Builds up to 7.x cannot read QSAFE007 files.
+Keys are unchanged across 5.x→8.0.
+
+Qsafe 6.0 introduced the framed **QSAFE006** format over QSAFE005 (constant
+memory with verify-before-release); both remain readable.
 
 Qsafe 5.0 was a **breaking change** from 4.x. Key establishment is now hybrid
 (X25519 + ML-KEM-1024) and the file format (`QSAFE005`) carries per-recipient

@@ -1,4 +1,4 @@
-.TH QSAFE 1 "2026" "Qsafe 6.0.0" "User Commands"
+.TH QSAFE 1 "2026" "Qsafe 8.0.0" "User Commands"
 .SH NAME
 qsafe \- hybrid post-quantum file encryption and signing
 .SH SYNOPSIS
@@ -60,6 +60,23 @@ Create a detached signature for a file (default \fIinput\fR.sig).
 .TP
 .B verify-sig " " \fIinput\fR " " [\fIsignature\fR]
 Verify a detached signature against a file.
+.TP
+.B keys " " <list|path|import|remove>
+Manage the keyring under ~/.qsafe (named identities and recipients).
+.TP
+.B split-key " " [\fIprefix\fR]
+Split the secret key into \fB\-\-shares\fR Shamir shares over GF(256), any
+\fB\-\-threshold\fR of which reconstruct it. Each share file is unencrypted
+key material \(em store them separately.
+.TP
+.B join-key " " \fIshare\fR " " \fIshare\fR " " [\fIshare\fR...]
+Reconstruct a secret key from shares and re\-wrap it under a freshly
+confirmed passphrase.
+.TP
+.B age-keygen / age-encrypt / age-decrypt
+Interoperate with the classical age (X25519) v1 file format. For
+\fIpost\-quantum\fR age recipients, see
+.BR age-plugin-qsafe .
 .SH OPTIONS
 .TP
 .BI \-\-key\-file " path"
@@ -79,6 +96,34 @@ Read the passphrase from the first line of a file.
 .TP
 .B \-\-check
 For decrypt/verify: authenticate only, write no plaintext.
+.TP
+.BI \-\-sign\-with " sk"
+For encrypt: embed an ML\-DSA\-87 sender signature inside the encrypted
+payload (needs \fIsk\fR and \fIsk\fR.pub, from \fBsign-keygen\fR). Decrypt
+verifies it automatically and reports the signer's fingerprint; verification
+failure removes any output.
+.TP
+.BI \-\-signer " pk"
+For decrypt/verify: additionally require the embedded signer to be exactly
+this public key.
+.TP
+.B \-\-pad
+For encrypt: append random padding to the file's Padm\('e bucket, so the
+ciphertext length reveals only a coarse size class. Requires a regular file
+input.
+.TP
+.BI \-\-threshold " t"
+For split-key: shares needed to reconstruct (2\-16).
+.TP
+.BI \-\-shares " n"
+For split-key: total shares to create (t\-255).
+.TP
+.B \-\-keychain
+Store (key\-creating commands) or retrieve the wrapping passphrase in the OS
+keychain \(em macOS Keychain or Windows DPAPI.
+.TP
+.BI \-\-identity " name"
+Use (or, for keygen, create) a keyring identity under ~/.qsafe.
 .TP
 .B \-\-armor
 Encrypt to ASCII base64 text; decrypt from base64 text.
@@ -128,6 +173,23 @@ Sign and verify a release artifact:
 qsafe sign-keygen
 qsafe sign release.tar.gz
 qsafe verify-sig release.tar.gz release.tar.gz.sig
+.fi
+.RE
+.PP
+Encrypt with an embedded sender signature and size hiding:
+.PP
+.RS
+.nf
+qsafe encrypt --sign-with sign_key.bin --pad -r alice.pub report.pdf
+.fi
+.RE
+.PP
+Split the secret key 2\-of\-3 and later recover it:
+.PP
+.RS
+.nf
+qsafe split-key --threshold 2 --shares 3 backup
+qsafe join-key backup.share1 backup.share3
 .fi
 .RE
 .SH EXIT STATUS

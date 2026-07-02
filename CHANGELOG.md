@@ -6,6 +6,53 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.0.0] - 2026-07-02
+
+The write format moves to **QSAFE007** (decrypt still reads QSAFE006/005, so
+nothing is stranded; v5/v6/v7 fixtures are pinned in CI). The QSAFE007 layout
+is now **frozen** and specified with test vectors (docs/FORMAT.md §10).
+
+### Added
+- **Embedded sender authentication** (`encrypt --sign-with <sk>`): an
+  ML-DSA-87 signature over (header ‖ metadata ‖ contents) travels *inside* the
+  encrypted payload and is verified automatically on decrypt/verify — the
+  signer's identity stays hidden from anyone who cannot decrypt. `--signer
+  <pk>` pins the expected signer; an invalid signature or the wrong signer
+  fails closed and removes any output.
+- **Size-hiding padding** (`encrypt --pad`): random padding to the file's
+  [Padmé](https://petsymposium.org/2019/files/papers/issue4/popets-2019-0056.pdf)
+  bucket, so the ciphertext length leaks only O(log log n) bits of the true
+  size (≤ ~12% overhead). Stripped transparently on decrypt.
+- **Shamir key recovery** (`split-key --threshold t --shares n` /
+  `join-key <shares...>`): information-theoretic secret sharing of the secret
+  key over GF(256). Shares carry a random set-id (foreign shares can't be
+  combined) and a digest (a corrupt share fails closed); `join-key` re-wraps
+  under a freshly confirmed passphrase.
+- **`age-plugin-qsafe`** — post-quantum recipients for the whole age
+  ecosystem: implements the C2SP age plugin protocol, so `age -r
+  age1qsafe1...` encrypts to a hybrid X25519 + ML-KEM-1024 identity from any
+  age client (validated against age 1.3.1, including mixed native+plugin
+  recipient files). `--keygen` / `-y` follow age-keygen conventions.
+- **Windows keychain backend**: `--keychain` now works on Windows via DPAPI
+  (user-scoped `CryptProtectData`, sealed blob under `%APPDATA%\qsafe\`).
+- **PyPI packaging**: `pip install qsafe` — per-platform wheels with libqsafe
+  bundled (cibuildwheel; published on tags via PyPI trusted publishing).
+- **Known-answer vectors + frozen fixtures**: independently generated KATs for
+  the hybrid KEK, frame AEAD, Padmé buckets, and the age-plugin label; frozen
+  plain/signed/padded QSAFE007 fixtures pin the reader.
+- **Supply-chain hardening**: SLSA build provenance on releases
+  (`gh attestation verify`), a reproducible-build CI gate (double build must
+  be byte-identical), a ctgrind-style constant-time valgrind harness
+  (`make ct`, advisory CI job), and OSS-Fuzz project files (`oss-fuzz/`)
+  ready for enrollment.
+
+### Changed
+- `encrypt` writes QSAFE007 (288-byte metadata block carrying content length,
+  padding length, and feature flags). Readers up to 7.x cannot read new
+  files; decrypt reads v7/v6/v5.
+- Object files now depend on the public headers in the Makefile, so header
+  changes can no longer produce stale-ABI builds.
+
 ## [7.0.0] - 2026-06-26
 
 A feature release. **No on-disk format change** — `encrypt` still writes

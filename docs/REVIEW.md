@@ -43,14 +43,18 @@ All cryptography is in `src/crypto_utils.c` (CLI/arg-parsing is in
 | Area | Function(s) | Notes |
 |:--|:--|:--|
 | Hybrid identity gen | `crypto_generate_identity` | X25519 (OpenSSL) + ML-KEM (liboqs) |
-| Per-recipient key wrap | `hybrid_wrap_cek` / `hybrid_unwrap_cek` | `HKDF(dh ‖ kem_ss)` → KEK → AES-GCM wrap of the CEK |
+| Per-recipient key wrap | `crypto_hybrid_wrap` / `crypto_hybrid_unwrap` | `HKDF(dh ‖ kem_ss)` → KEK → AES-GCM wrap; label + key-length generalized (native container and age plugin) |
 | KDF | `hkdf_sha256`, `crypto_derive_aes_key` | HKDF-SHA256; empty salt (RFC 5869 zero salt) |
-| Framed payload (v6) | `crypto_encrypt_file`, `crypto_decrypt_file` | per-frame AES-GCM; `frame_nonce` = counter ‖ final-flag |
-| Legacy payload (v5) | `crypto_decrypt_file` (`is_v6 == 0` path) | single AES-GCM, tag held back; read-only |
+| Framed payload (v7/v6) | `crypto_encrypt_file`, `crypto_decrypt_file` | per-frame AES-GCM; `frame_nonce` = counter ‖ final-flag |
+| Legacy payload (v5) | `crypto_decrypt_file` (`framed == 0` path) | single AES-GCM, tag held back; read-only |
 | Frame AEAD | `gcm_seal_aad` / `gcm_open_aad` | header bound as AAD on frame 0 |
+| Embedded sender sig (v7) | encrypt trailer stage; `dec_sink_finish` | ML-DSA-87 over SHA-256("qsafe-v7-signed" ‖ header ‖ META ‖ contents); fixed 7221-byte trailer inside the payload |
+| Padding (v7) | `crypto_padme_size`; sink pad routing | Padmé buckets; declared in META, discarded on read |
 | Secret-key wrap | `crypto_save_secret_key` / `crypto_load_secret_key` | scrypt (`QSAFEK01` header, params authenticated as AAD) |
-| Signatures | `crypto_sign_file` / `crypto_verify_signature` | ML-DSA-87 over SHA-256(file) |
-| Output sink / metadata | `dec_sink_*` | parses the 272-byte metadata block; path-traversal defense |
+| Signatures (detached) | `crypto_sign_file` / `crypto_verify_signature` | ML-DSA-87 over SHA-256(file) |
+| Output sink / metadata | `dec_sink_*` | parses the 288-byte (v7) / 272-byte metadata block; splits contents/trailer/padding; path-traversal defense |
+| Shamir shares | `src/sss.c` | GF(256), generator 0x03; set-id + digest checks; NOT constant-time (offline recovery path) |
+| age plugin | `src/age_plugin.c` | C2SP plugin protocol, bech32, stanza wire I/O; crypto delegated to `crypto_hybrid_wrap/unwrap` |
 | Armor | `crypto_armor` / `crypto_dearmor` | base64 transport only |
 
 ## 4. Highest-value things to attack

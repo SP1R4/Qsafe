@@ -11,7 +11,7 @@
 #include "crypto_utils.h"
 #include "libqsafe.h"
 
-#define QSAFE_LIB_VERSION "7.0.0"
+#define QSAFE_LIB_VERSION "8.0.0"
 
 const char *qsafe_version(void) { return QSAFE_LIB_VERSION; }
 
