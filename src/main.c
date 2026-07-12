@@ -55,6 +55,7 @@ static void print_usage(void) {
     printf("  %s vault ls|rm <path> [--name <s>]\n", PROGRAM_NAME);
     printf("  %s vault extract <path> --name <s> <output>\n", PROGRAM_NAME);
     printf("  %s vault passwd <path> --new-passphrase-file <p>\n", PROGRAM_NAME);
+    printf("  %s secrets set|get|list|rm [key]    (encrypted credential store)\n", PROGRAM_NAME);
     printf("\n");
     printf("Commands:\n");
     printf("  keygen       Generate a hybrid X25519 + ML-KEM-1024 keypair (run once)\n");
@@ -73,6 +74,7 @@ static void print_usage(void) {
     printf("  age-encrypt  Encrypt to age 'age1...' recipients (interop; classical only)\n");
     printf("  age-decrypt  Decrypt an age file with an age identity file (-i)\n");
     printf("  vault        Deniable hidden-volume containers (experimental; docs/HIDDEN_VOLUMES.md)\n");
+    printf("  secrets      Encrypted key-value credential store over a vault volume\n");
     printf("\n");
     printf("Files vs. directories are detected automatically. Use '-' as the input\n");
     printf("or output to read from stdin / write to stdout.\n");
@@ -101,6 +103,7 @@ static void print_usage(void) {
     printf("  --keep <ppfile>         vault create/add/rm: also preserve this volume (repeatable)\n");
     printf("  --keyfile <path>        vault v2: require this keyfile as a second factor\n");
     printf("  --argon2                vault v2: derive keys with Argon2id (--scrypt-cost sets memory in KiB)\n");
+    printf("  --store <path>          secrets: store file (default: ~/.qsafe/secrets.bin)\n");
     printf("  --new-passphrase-file <p> vault passwd: file holding the replacement passphrase\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
@@ -576,6 +579,85 @@ static int run_vault_command(const char *const *positionals, int npos,
     return 1;
 }
 
+/* ------------------------- secrets (key-value store) ----------------------
+ * A credential store layered on a vault volume: `qsafe secrets set|get|list|rm`.
+ * Values move only in memory (never a temp file). The default store is
+ * $QSAFE_HOME/secrets.bin (~/.qsafe/secrets.bin); --store overrides it. */
+static int run_secrets_command(const char *const *positionals, int npos,
+                               crypto_config_t *config, const char *cli_passphrase,
+                               const char *passphrase_file, const char *store_override,
+                               char *passbuf, size_t passbuf_size) {
+    const char *sub = positionals[0];
+    if (!sub) { fprintf(stderr, "Error: secrets <set|get|list|rm> [key]\n"); return 1; }
+
+    /* Resolve the store path. */
+    char storebuf[MAX_PATH_LENGTH];
+    const char *store = store_override;
+    if (!store) {
+        const char *over = getenv("QSAFE_HOME");
+        char base[MAX_PATH_LENGTH];
+        if (over && *over) {
+            snprintf(base, sizeof(base), "%s", over);
+        } else {
+            const char *home = qsafe_home_dir();
+            if (!home) { fprintf(stderr, "Error: cannot locate home (set HOME or --store)\n"); return 1; }
+            snprintf(base, sizeof(base), "%s/.qsafe", home);
+        }
+        if (snprintf(storebuf, sizeof(storebuf), "%s/secrets.bin", base) >= (int)sizeof(storebuf)) return 1;
+        store = storebuf;
+        if (strcmp(sub, "set") == 0) qsafe_mkdir_p(base); /* ensure the dir exists for a first `set` */
+    }
+
+    if (resolve_passphrase(config, cli_passphrase, passphrase_file, 0, passbuf, passbuf_size) != CRYPTO_SUCCESS)
+        return 1;
+
+    if (strcmp(sub, "set") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets set <key>  (value on stdin)\n"); return 1; }
+        const char *key = positionals[1];
+        /* Read the value from stdin (no temp file). A tty prompts without echo. */
+        unsigned char *val = NULL; size_t vlen = 0, cap = 0;
+        if (qsafe_isatty_stdin()) {
+            char line[MAX_PASSPHRASE];
+            if (!read_hidden("Value: ", line, sizeof(line))) { fprintf(stderr, "Error: no value read\n"); return 1; }
+            vlen = strlen(line);
+            val = malloc(vlen ? vlen : 1);
+            if (!val) return 1;
+            memcpy(val, line, vlen);
+            OPENSSL_cleanse(line, sizeof(line));
+        } else {
+            cap = 4096; val = malloc(cap);
+            if (!val) return 1;
+            size_t n;
+            unsigned char tmp[4096];
+            while ((n = fread(tmp, 1, sizeof(tmp), stdin)) > 0) {
+                if (vlen + n > cap) { cap = (vlen + n) * 2; unsigned char *nv = realloc(val, cap); if (!nv) { free(val); return 1; } val = nv; }
+                memcpy(val + vlen, tmp, n); vlen += n;
+            }
+            OPENSSL_cleanse(tmp, sizeof(tmp));
+            /* Strip a single trailing newline (convenience for `echo`/typing). */
+            if (vlen > 0 && val[vlen - 1] == '\n') vlen--;
+        }
+        crypto_error_t r = vault_secret_put(store, key, val, (uint64_t)vlen, config);
+        OPENSSL_cleanse(val, vlen ? vlen : 1);
+        free(val);
+        if (r == CRYPTO_SUCCESS) fprintf(stderr, "Stored '%s'\n", key);
+        return r == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "get") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets get <key>\n"); return 1; }
+        return vault_secret_get(store, positionals[1], config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "list") == 0) {
+        return vault_secret_list(store, config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "rm") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets rm <key>\n"); return 1; }
+        return vault_secret_rm(store, positionals[1], config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    fprintf(stderr, "Error: unknown secrets subcommand '%s'\n", sub);
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
      * by CRLF translation. No-op on POSIX. */
@@ -621,6 +703,7 @@ int main(int argc, char *argv[]) {
     int n_vault_keeps = 0;
     const char *vault_keyfile_path = NULL; /* vault v2: --keyfile (two-factor) */
     const char *vault_new_pp_file = NULL;  /* vault passwd: --new-passphrase-file */
+    const char *secrets_store = NULL;      /* secrets: --store <path> (default ~/.qsafe/secrets.bin) */
     const char *identity_name = NULL;
     const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
     const char *positionals[16] = { NULL };  /* join-key takes up to 16 shares */
@@ -743,6 +826,9 @@ int main(int argc, char *argv[]) {
             vault_new_pp_file = argv[i];
         } else if (strcmp(a, "--argon2") == 0) {
             config.vault_kdf_argon2 = 1;
+        } else if (strcmp(a, "--store") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --store requires a path\n"); return 1; }
+            secrets_store = argv[i];
         } else if (strcmp(a, "--keep") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --keep requires a passphrase file\n"); return 1; }
             if (n_vault_keeps >= (int)(sizeof(vault_keeps) / sizeof(vault_keeps[0]))) {
@@ -786,10 +872,11 @@ int main(int argc, char *argv[]) {
     int is_age_encrypt = strcmp(command, "age-encrypt") == 0;
     int is_age_decrypt = strcmp(command, "age-decrypt") == 0;
     int is_vault = strcmp(command, "vault") == 0;
+    int is_secrets = strcmp(command, "secrets") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
         !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys &&
         !is_split_key && !is_join_key &&
-        !is_age_keygen && !is_age_encrypt && !is_age_decrypt && !is_vault) {
+        !is_age_keygen && !is_age_encrypt && !is_age_decrypt && !is_vault && !is_secrets) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
         return 1;
@@ -821,6 +908,22 @@ int main(int argc, char *argv[]) {
                                  vault_capacity, vault_capacity_set,
                                  vault_name, vault_keeps, n_vault_keeps, vault_new_pp_file,
                                  passbuf_vault, sizeof(passbuf_vault));
+    }
+
+    /* secrets is a credential store over a vault volume — same no-KEM path. */
+    if (is_secrets) {
+        char passbuf_sec[MAX_PASSPHRASE];
+        memset(passbuf_sec, 0, sizeof(passbuf_sec));
+        unsigned char sec_keyfile_key[32];
+        if (vault_keyfile_path) {
+            if (vault_keyfile_from_file(vault_keyfile_path, sec_keyfile_key) != CRYPTO_SUCCESS) {
+                fprintf(stderr, "Error: cannot read --keyfile '%s'\n", vault_keyfile_path);
+                return 1;
+            }
+            config.vault_keyfile_key = sec_keyfile_key;
+        }
+        return run_secrets_command(positionals, npos, &config, cli_passphrase, passphrase_file,
+                                   secrets_store, passbuf_sec, sizeof(passbuf_sec));
     }
 
     /* verify is decrypt that authenticates but writes nothing. */

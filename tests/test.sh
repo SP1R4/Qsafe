@@ -874,8 +874,11 @@ echo "two-factor protected loot" > "$TMPDIR/kf_loot.txt"
 check_ok "vault create --keyfile" \
     "$BINARY" vault create "$KFC" --size 1500000 --scrypt-cost 14 \
     --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
+# Auto-place the slot: the keyfile is random, so the anchor lands at a random
+# offset — a fixed --offset could collide with it (~5% of runs). Auto-placement
+# finds a gap that avoids the anchor wherever it is.
 check_ok "vault add --keyfile" \
-    "$BINARY" vault add "$KFC" "$TMPDIR/kf_loot.txt" --name loot --offset 400000 --capacity 80000 \
+    "$BINARY" vault add "$KFC" "$TMPDIR/kf_loot.txt" --name loot \
     --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
 check_ok "correct passphrase + correct keyfile extracts" sh -c \
     "\"$BINARY\" vault extract \"$KFC\" --name loot \"$TMPDIR/kf_loot.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/kf.pass\" --keyfile \"$TMPDIR/kf_key.bin\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/kf_loot.txt\" \"$TMPDIR/kf_loot.out\""
@@ -986,6 +989,36 @@ if [ "${QSAFE_SLOW_TESTS:-0}" = "1" ]; then
 else
     pass "overflow-directory e2e skipped (set QSAFE_SLOW_TESTS=1 to run)"
 fi
+
+# --- Test 23: secrets (encrypted key-value store over a vault volume) ---
+echo ""
+echo "[test: secrets set/get/list/rm]"
+SEC="$TMPDIR/secrets_store.bin"
+SECPASS="secrets-master-passphrase"
+check_ok "secrets set creates the store and stores a value" sh -c \
+    "printf 'AKIA-example' | env QSAFE_PASSPHRASE='$SECPASS' \"$BINARY\" secrets --store \"$SEC\" --scrypt-cost 14 set aws.key >/dev/null 2>&1"
+check_ok "secrets set a second value" sh -c \
+    "printf 'db-secret' | env QSAFE_PASSPHRASE='$SECPASS' \"$BINARY\" secrets --store \"$SEC\" --scrypt-cost 14 set db.pass >/dev/null 2>&1"
+# get returns exactly the stored value on stdout (no trailing newline from set).
+GOT=$(env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 get aws.key 2>/dev/null)
+[ "$GOT" = "AKIA-example" ] && pass "secrets get returns the exact value on stdout" \
+    || fail "secrets get returns the exact value on stdout (got '$GOT')"
+# list shows both keys.
+NK=$(env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 list 2>/dev/null | grep -cE "aws.key|db.pass")
+[ "$NK" = 2 ] && pass "secrets list shows both keys" || fail "secrets list shows both keys (got $NK)"
+# set on an existing key replaces (does not add a duplicate).
+printf 'rotated' | env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 set aws.key >/dev/null 2>&1
+GOT2=$(env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 get aws.key 2>/dev/null)
+NTOT=$(env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 list 2>/dev/null | wc -l | tr -d ' ')
+[ "$GOT2" = "rotated" ] && [ "$NTOT" = 2 ] && pass "secrets set replaces an existing key in place" \
+    || fail "secrets set replaces an existing key in place (val='$GOT2' count=$NTOT)"
+# wrong passphrase cannot read.
+check_fail "wrong passphrase cannot open the secrets store" \
+    env QSAFE_PASSPHRASE="wrong-pass" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 get aws.key
+# rm removes a key.
+env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 rm db.pass >/dev/null 2>&1
+env QSAFE_PASSPHRASE="$SECPASS" "$BINARY" secrets --store "$SEC" --scrypt-cost 14 list 2>/dev/null | grep -q "db.pass" \
+    && fail "secrets rm removes a key" || pass "secrets rm removes a key"
 
 # --- Results ---
 echo ""

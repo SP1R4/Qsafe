@@ -36,6 +36,16 @@ static inline void qsafe_set_binary_stdio(void) {
 #endif
 }
 
+/* Returns 1 if stdin is an interactive terminal (so a value can be prompted
+ * for without echo) rather than a pipe/file. */
+static inline int qsafe_isatty_stdin(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin));
+#else
+    return isatty(fileno(stdin));
+#endif
+}
+
 /* Create a directory with default permissions. Returns 0 on success. */
 static inline int qsafe_mkdir(const char *path) {
 #ifdef _WIN32

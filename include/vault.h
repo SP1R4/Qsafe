@@ -211,4 +211,24 @@ crypto_error_t vault_volume_passwd(const char *container, const crypto_config_t 
                                    const char *new_passphrase,
                                    const char *const *keep_passphrases, int n_keep);
 
+/* --- secrets: an encrypted key-value store over a single vault volume ---
+ * A convenience layer for credentials: a secret is a named slot whose content
+ * is the value. Values move only in memory (never a temp file). Inherits the
+ * volume's deniability and honours config's cost / --keyfile / --argon2. */
+
+/* Store `value` under `key`, creating the container if missing and overwriting
+ * any existing value for that key. */
+crypto_error_t vault_secret_put(const char *container, const char *key,
+                                const unsigned char *value, uint64_t value_len,
+                                const crypto_config_t *config);
+
+/* Write the value for `key` to stdout. */
+crypto_error_t vault_secret_get(const char *container, const char *key, const crypto_config_t *config);
+
+/* Print the store's key names, one per line, to stdout. */
+crypto_error_t vault_secret_list(const char *container, const crypto_config_t *config);
+
+/* Remove `key` from the store. */
+crypto_error_t vault_secret_rm(const char *container, const char *key, const crypto_config_t *config);
+
 #endif /* QSAFE_VAULT_H */

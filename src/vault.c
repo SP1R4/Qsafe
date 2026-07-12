@@ -1206,10 +1206,16 @@ static crypto_error_t vault_mutate(const char *container, const crypto_config_t 
     return ret;
 }
 
-crypto_error_t vault_volume_add(const char *container, const char *name, const char *infile,
-                                uint64_t offset, int have_offset,
-                                uint64_t capacity, int have_capacity, const crypto_config_t *config,
-                                const char *const *keep_passphrases, int n_keep) {
+/* In-memory core of `add`: seals `content` (content_len bytes) as slot `name`.
+ * `replace` overwrites an existing slot of that name in one rewrite (else a
+ * duplicate is an error); `quiet` suppresses the success line (for the secrets
+ * layer). `content` is not freed here. */
+static crypto_error_t vault_volume_add_mem(const char *container, const char *name,
+                                           const unsigned char *content, uint64_t content_len,
+                                           uint64_t offset, int have_offset,
+                                           uint64_t capacity, int have_capacity,
+                                           int replace, int quiet, const crypto_config_t *config,
+                                           const char *const *keep_passphrases, int n_keep) {
     if (!config->passphrase) { fprintf(stderr, "Error: vault add requires a passphrase\n"); return CRYPTO_ERR_INVALID_INPUT; }
     if (have_capacity && (capacity < VAULT_MIN_CAPACITY || capacity > VAULT_MAX_CAPACITY)) { fprintf(stderr, "Error: --capacity out of range\n"); return CRYPTO_ERR_INVALID_INPUT; }
     if (have_offset && offset > VAULT_MAX_OFFSET) { fprintf(stderr, "Error: --offset out of range\n"); return CRYPTO_ERR_INVALID_INPUT; }
@@ -1223,30 +1229,25 @@ crypto_error_t vault_volume_add(const char *container, const char *name, const c
     crypto_error_t ret = vault_open_volume(f, size, config->passphrase, config, &dir, &a_off);
     fclose(f);
     if (ret != CRYPTO_SUCCESS) { fprintf(stderr, "Error: no volume here for this passphrase\n"); return CRYPTO_ERR_INTEGRITY; }
-    if (vault_dir_find(&dir, name) >= 0) { fprintf(stderr, "Error: an entry named '%s' already exists\n", name); return CRYPTO_ERR_INVALID_INPUT; }
+    if (vault_dir_find(&dir, name) >= 0) {
+        if (!replace) { fprintf(stderr, "Error: an entry named '%s' already exists\n", name); return CRYPTO_ERR_INVALID_INPUT; }
+        vault_dir_remove(&dir, name); /* the old slot becomes filler on rewrite */
+    }
 
-    unsigned char *content = NULL; uint64_t content_len = 0;
-    if (!vault_read_file(infile, &content, &content_len)) { fprintf(stderr, "Error: cannot read '%s'\n", infile); return CRYPTO_ERR_FILE_IO; }
-
-    /* Default capacity: an exact fit for the content plus its 8-byte length
-     * prefix (bounded below by the minimum). */
     if (!have_capacity) {
         capacity = content_len + 8;
         if (capacity < VAULT_MIN_CAPACITY) capacity = VAULT_MIN_CAPACITY;
-        if (capacity > VAULT_MAX_CAPACITY) { free(content); fprintf(stderr, "Error: input too large for a slot\n"); return CRYPTO_ERR_INVALID_INPUT; }
+        if (capacity > VAULT_MAX_CAPACITY) { fprintf(stderr, "Error: input too large for a slot\n"); return CRYPTO_ERR_INVALID_INPUT; }
     }
     if (content_len > capacity - 8) {
-        fprintf(stderr, "Error: '%s' is %llu bytes; slot capacity holds at most %llu\n",
-                infile, (unsigned long long)content_len, (unsigned long long)(capacity - 8));
-        free(content); return CRYPTO_ERR_INVALID_INPUT;
+        fprintf(stderr, "Error: value is %llu bytes; slot capacity holds at most %llu\n",
+                (unsigned long long)content_len, (unsigned long long)(capacity - 8));
+        return CRYPTO_ERR_INVALID_INPUT;
     }
 
-    /* Collect the occupied ranges of every volume we can see (this volume's
-     * anchor, overflow blocks and data slots, plus each --keep volume's). Used
-     * to auto-place the new data slot and any new overflow directory block. */
     int rcap = (1 + n_keep) * (VAULT_MAX_VOL_ENTRIES + VAULT_MAX_BLOCKS) + VAULT_MAX_BLOCKS + 1;
     vault_range_t *ranges = malloc((size_t)rcap * sizeof(*ranges));
-    if (!ranges) { free(content); return CRYPTO_ERR_MEMORY; }
+    if (!ranges) return CRYPTO_ERR_MEMORY;
     int nr = 0;
     vault_collect_ranges(a_off, &dir, ranges, &nr, rcap);
     {
@@ -1254,7 +1255,7 @@ crypto_error_t vault_volume_add(const char *container, const char *name, const c
         for (int k = 0; k < n_keep && kf; k++) {
             vault_dir_t kd; uint64_t ka;
             if (vault_open_volume(kf, size, keep_passphrases[k], config, &kd, &ka) != CRYPTO_SUCCESS) {
-                fclose(kf); free(ranges); free(content);
+                fclose(kf); free(ranges);
                 fprintf(stderr, "Error: cannot open a --keep volume for placement (wrong passphrase?)\n");
                 return CRYPTO_ERR_INTEGRITY;
             }
@@ -1264,19 +1265,17 @@ crypto_error_t vault_volume_add(const char *container, const char *name, const c
     }
 
     if (!have_offset && !vault_find_free(ranges, nr, size, vault_slot_len(capacity), &offset)) {
-        free(ranges); free(content);
+        free(ranges);
         fprintf(stderr, "Error: no free space for a %llu-byte slot in the visible volumes\n",
                 (unsigned long long)vault_slot_len(capacity));
         return CRYPTO_ERR_INVALID_INPUT;
     }
-    /* Reserve the data slot so a new overflow block won't be placed on top of it. */
     ranges[nr].start = offset; ranges[nr].end = offset + vault_slot_len(capacity); nr++;
 
     unsigned char *blob = malloc(capacity);
     if (!blob || !vault_make_data_blob(content, content_len, capacity, blob)) {
-        free(ranges); free(content); free(blob); return CRYPTO_ERR_CRYPTO;
+        free(ranges); free(blob); return CRYPTO_ERR_CRYPTO;
     }
-    free(content);
 
     uint32_t log_n = config->scrypt_n ? (uint32_t)__builtin_ctzll(config->scrypt_n) : VAULT_DEFAULT_LOG_N;
     vault_entry_t e;
@@ -1290,7 +1289,6 @@ crypto_error_t vault_volume_add(const char *container, const char *name, const c
         return CRYPTO_ERR_INVALID_INPUT;
     }
 
-    /* If the volume now spans another directory block, auto-place it too. */
     int need = vault_required_blocks(dir.entry_count);
     while (dir.noverflow < need - 1) {
         uint64_t boff;
@@ -1307,8 +1305,22 @@ crypto_error_t vault_volume_add(const char *container, const char *name, const c
     ret = vault_mutate(container, config, keep_passphrases, n_keep, &dir, blob);
     OPENSSL_cleanse(blob, capacity);
     free(blob);
-    if (ret == CRYPTO_SUCCESS)
+    if (ret == CRYPTO_SUCCESS && !quiet)
         printf("Added '%s' (%llu bytes) at offset %llu\n", name, (unsigned long long)content_len, (unsigned long long)offset);
+    return ret;
+}
+
+crypto_error_t vault_volume_add(const char *container, const char *name, const char *infile,
+                                uint64_t offset, int have_offset,
+                                uint64_t capacity, int have_capacity, const crypto_config_t *config,
+                                const char *const *keep_passphrases, int n_keep) {
+    unsigned char *content = NULL; uint64_t content_len = 0;
+    if (!vault_read_file(infile, &content, &content_len)) { fprintf(stderr, "Error: cannot read '%s'\n", infile); return CRYPTO_ERR_FILE_IO; }
+    crypto_error_t ret = vault_volume_add_mem(container, name, content, content_len,
+                                              offset, have_offset, capacity, have_capacity,
+                                              0 /*replace*/, 0 /*quiet*/, config, keep_passphrases, n_keep);
+    OPENSSL_cleanse(content, (size_t)content_len);
+    free(content);
     return ret;
 }
 
@@ -1376,4 +1388,57 @@ crypto_error_t vault_volume_passwd(const char *container, const crypto_config_t 
     free(plans);
     if (ret == CRYPTO_SUCCESS) printf("Passphrase changed for the volume in %s\n", container);
     return ret;
+}
+
+/* ===================================================================== */
+/* secrets: an encrypted key-value store layered on a vault volume        */
+/* ===================================================================== */
+
+/* Default size of a freshly-created secrets container. Small values, up to
+ * VAULT_MAX_VOL_ENTRIES of them; the rest is deniability filler. */
+#define VAULT_SECRETS_DEFAULT_SIZE (1u << 20) /* 1 MiB */
+
+/* Store `value` under `key`, creating the container (one empty volume) if it
+ * does not exist yet and overwriting any existing value for that key — all
+ * in-memory, so a plaintext credential never touches a temp file. */
+crypto_error_t vault_secret_put(const char *container, const char *key,
+                                const unsigned char *value, uint64_t value_len,
+                                const crypto_config_t *config) {
+    struct stat st;
+    if (stat(container, &st) != 0) {
+        crypto_error_t cr = vault_volume_create(container, VAULT_SECRETS_DEFAULT_SIZE, config, 0, NULL, 0);
+        if (cr != CRYPTO_SUCCESS) return cr;
+    }
+    return vault_volume_add_mem(container, key, value, value_len, 0, 0, 0, 0,
+                                1 /*replace*/, 1 /*quiet*/, config, NULL, 0);
+}
+
+/* Write the value for `key` to stdout. */
+crypto_error_t vault_secret_get(const char *container, const char *key, const crypto_config_t *config) {
+    return vault_volume_extract(container, key, "-", config);
+}
+
+/* Print the store's key names (one per line) to stdout. */
+crypto_error_t vault_secret_list(const char *container, const crypto_config_t *config) {
+    if (!config->passphrase) { fprintf(stderr, "Error: secrets requires a passphrase\n"); return CRYPTO_ERR_INVALID_INPUT; }
+    uint64_t size;
+    if (!vault_container_size(container, &size)) { fprintf(stderr, "Error: no secrets store at '%s'\n", container); return CRYPTO_ERR_FILE_IO; }
+    FILE *f = fopen(container, "rb");
+    if (!f) return CRYPTO_ERR_FILE_IO;
+    vault_dir_t dir; uint64_t a_off;
+    crypto_error_t ret = vault_open_volume(f, size, config->passphrase, config, &dir, &a_off);
+    fclose(f);
+    if (ret != CRYPTO_SUCCESS) { fprintf(stderr, "Error: cannot open the secrets store (wrong passphrase?)\n"); return CRYPTO_ERR_INTEGRITY; }
+    for (uint16_t i = 0; i < dir.entry_count; i++) {
+        char name[VAULT_MAX_NAME_LEN + 1];
+        memcpy(name, dir.entries[i].name, dir.entries[i].name_len);
+        name[dir.entries[i].name_len] = '\0';
+        printf("%s\n", name);
+    }
+    return CRYPTO_SUCCESS;
+}
+
+/* Remove `key` from the store. */
+crypto_error_t vault_secret_rm(const char *container, const char *key, const crypto_config_t *config) {
+    return vault_volume_rm(container, key, config, NULL, 0);
 }

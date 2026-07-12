@@ -117,6 +117,15 @@ re\-randomized), so a byte\-level diff of two snapshots leaks nothing. A write
 preserves only the volumes whose passphrase it is given (the target plus any
 \fB\-\-keep\fR); omitting a volume's passphrase destroys it.
 .TP
+.B secrets " " <set|get|list|rm> " " [\fIkey\fR]
+An encrypted key-value credential store layered on a vault volume (a secret is
+a named slot whose content is the value). \fBset\fR reads the value from stdin
+(or prompts without echo on a terminal) and overwrites an existing key;
+\fBget\fR writes the value to stdout; \fBlist\fR prints the key names; \fBrm\fR
+deletes one. Values move only in memory, never a temp file. The default store
+is ~/.qsafe/secrets.bin (\fB\-\-store\fR overrides). Honours \fB\-\-keyfile\fR,
+\fB\-\-argon2\fR and \fB\-\-scrypt\-cost\fR.
+.TP
 .B age-keygen / age-encrypt / age-decrypt
 Interoperate with the classical age (X25519) v1 file format. For
 \fIpost\-quantum\fR age recipients, see
@@ -205,6 +214,9 @@ For vault v2: derive passphrase keys with Argon2id (RFC 9106) instead of scrypt.
 \fB\-\-scrypt\-cost\fR is reused as the Argon2 memory cost (2^c KiB). The choice
 is remembered out of band \(em an Argon2 container opens only with
 \fB\-\-argon2\fR. Requires OpenSSL 3.2+.
+.TP
+.BI \-\-store " path"
+For secrets: the store file (default ~/.qsafe/secrets.bin).
 .TP
 .BI \-\-new\-passphrase\-file " path"
 For vault passwd: file holding the replacement passphrase.

@@ -19,6 +19,7 @@ _qsafe() {
         'split-key:Split the secret key into Shamir shares'
         'join-key:Reconstruct a secret key from shares'
         'vault:Deniable hidden-volume containers'
+        'secrets:Encrypted key-value credential store'
         'age-keygen:Generate an age (X25519) keypair'
         'age-encrypt:Encrypt to age recipients (classical interop)'
         'age-decrypt:Decrypt an age file'
@@ -51,6 +52,7 @@ _qsafe() {
         '--keyfile[vault v2: second-factor keyfile]:file:_files' \
         '--new-passphrase-file[vault passwd: new passphrase file]:file:_files' \
         '--argon2[vault v2: use Argon2id instead of scrypt]' \
+        '--store[secrets: store file path]:file:_files' \
         '--verbose[Verbose output]' \
         '--force[Overwrite without prompting]' \
         '--help[Show usage]' \
@@ -80,6 +82,15 @@ _qsafe() {
                     'passwd:Change a volume'\''s passphrase'
                 )
                 _describe -t vaultsub 'vault subcommand' subs
+            elif [[ "${words[2]}" == secrets ]]; then
+                local -a ssubs
+                ssubs=(
+                    'set:Store a value (from stdin) under a key'
+                    'get:Write a key'\''s value to stdout'
+                    'list:List key names'
+                    'rm:Remove a key'
+                )
+                _describe -t secretssub 'secrets subcommand' ssubs
             fi
             ;;
     esac

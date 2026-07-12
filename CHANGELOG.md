@@ -65,7 +65,15 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is byte-identical, so existing containers/fixtures/KATs are unaffected. Adds
   an exported `crypto_derive_key_argon2id`, KAT-pinned against the `openssl kdf`
   CLI. Requires OpenSSL 3.2+.
-- **Man page + shell completions** now cover every `vault` subcommand and option.
+- **`secrets` — encrypted credential store** (`secrets set|get|list|rm`): a
+  password-manager-style key-value store layered on a single vault volume,
+  inheriting its deniability and honouring `--keyfile`/`--argon2`/cost. `set`
+  reads the value from stdin (or prompts without echo on a tty) and replaces an
+  existing key in one rewrite; `get` writes the value to stdout. Values move
+  only in memory — a plaintext credential never touches a temp file. Default
+  store `~/.qsafe/secrets.bin`, overridable with `--store`.
+- **Man page + shell completions** now cover every `vault` and `secrets`
+  subcommand and option.
 
 ### Assurance
 - Vault known-answer tests (salt derivation, `ciphertext_len`, frame AEAD with
