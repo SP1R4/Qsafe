@@ -23,6 +23,10 @@ secret_key.bin
 *.key
 *.pem
 
+# ...but the checked-in test fixtures (frozen containers that pin on-disk
+# format compatibility) are not secrets and must be tracked.
+!tests/fixtures/**/*.bin
+
 # Claude Code
 .claude/
 

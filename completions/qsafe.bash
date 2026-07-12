@@ -10,14 +10,16 @@ _qsafe() {
     }
 
     local commands="keygen encrypt decrypt verify rekey inspect sign-keygen sign verify-sig \
-keys split-key join-key age-keygen age-encrypt age-decrypt help version"
+keys split-key join-key vault age-keygen age-encrypt age-decrypt help version"
+    local vault_subcommands="init write read footprint create add ls extract rm passwd"
     local options="--key-file --pub-file --recipient -r --identity --identity-file -i \
 --passphrase --passphrase-file --check --armor --sign-with --signer --pad \
---threshold --shares --scrypt-cost --keychain --verbose --force --help --version"
+--threshold --shares --scrypt-cost --keychain --verbose --force --help --version \
+--size --offset --capacity --name --keep --keyfile --new-passphrase-file"
 
     # Options that take a file/path argument.
     case "$prev" in
-        --key-file|--pub-file|--recipient|-r|--passphrase-file|--sign-with|--signer|--identity-file|-i)
+        --key-file|--pub-file|--recipient|-r|--passphrase-file|--sign-with|--signer|--identity-file|-i|--keep|--keyfile|--new-passphrase-file)
             COMPREPLY=( $(compgen -f -- "$cur") )
             return 0
             ;;
@@ -50,6 +52,21 @@ keys split-key join-key age-keygen age-encrypt age-decrypt help version"
     if [[ -z "$cmd" && "$cur" != -* ]]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
         return 0
+    fi
+
+    # For `vault`, complete the subcommand as the first argument after it.
+    if [[ "$cmd" == "vault" && "$cur" != -* ]]; then
+        local j sub=""
+        for (( j=i+1; j < COMP_CWORD; j++ )); do
+            case "${COMP_WORDS[j]}" in
+                -*) ;;
+                *) sub="${COMP_WORDS[j]}"; break ;;
+            esac
+        done
+        if [[ -z "$sub" ]]; then
+            COMPREPLY=( $(compgen -W "$vault_subcommands" -- "$cur") )
+            return 0
+        fi
     fi
 
     if [[ "$cur" == -* ]]; then

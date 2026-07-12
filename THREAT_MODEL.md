@@ -142,9 +142,16 @@ Qsafe is the wrong tool.
    this is best-effort, not a guarantee against a privileged adversary.
 4. **Passphrase strength is your responsibility.** scrypt slows guessing, but a
    weak passphrase on a stolen key file is the weakest link.
-5. **No deniability or anti-traffic-analysis.** No plausible-deniability mode,
-   no hidden volumes, no metadata anonymity. (`--pad` blunts *size* leakage,
-   nothing else.)
+5. **The standard container (`encrypt`/`decrypt`) offers no deniability or
+   anti-traffic-analysis.** It has a visible `QSAFE007` magic, a visible
+   recipient count, and no plausible-deniability mode; `--pad` blunts *size*
+   leakage and nothing else. A **separate, opt-in** format —
+   `qsafe vault` (experimental, [docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md))
+   — does provide deniable hidden volumes, but it is a distinct symmetric-only
+   container with its own threat model and its own limitations (notably: broken
+   by an adversary holding two snapshots of the same container). It is not a
+   property of the normal encrypt path, and nothing here retrofits deniability
+   onto a `.qsafe` file.
 6. **No replay/freshness context.** Qsafe authenticates that a file is intact and
    addressed to you; it does not bind a file to a time, sequence, or context.
    Re-sending an old valid ciphertext is not detected by Qsafe itself.
@@ -186,14 +193,20 @@ Qsafe's guarantees hold only if:
 
 ## 8. Assurance measures in this repository
 
-- **Known-answer tests** for SHA-256, HKDF-SHA256, and scrypt with values
-  computed independently of Qsafe's code (`tests/test_crypto_utils.c`).
+- **Known-answer tests** for SHA-256, HKDF-SHA256, scrypt, the QSAFE007 frame
+  AEAD, and the `vault` salt derivation, with values computed independently of
+  Qsafe's code (`tests/test_crypto_utils.c`), plus frozen container fixtures
+  for both formats.
 - **AddressSanitizer + UndefinedBehaviorSanitizer + Valgrind** over the test
   suite in CI (`.github/workflows/hardening.yml`).
-- **Fuzzing harness** over the untrusted-input parsers
-  (`tests/fuzz_decrypt.c`, `make fuzz`) with a CI smoke run.
+- **Fuzzing harnesses** over the untrusted-input parsers — the QSAFE
+  decrypt/inspect/dearmor path (`tests/fuzz_decrypt.c`) and the `vault`
+  hidden-volume reader (`tests/fuzz_vault.c`) — via `make fuzz` / `make
+  fuzz-vault`, with CI smoke runs and OSS-Fuzz build targets.
 - **End-to-end tests** for tamper rejection, wrong-key rejection,
-  multi-recipient isolation, and signature forgery rejection (`tests/test.sh`).
+  multi-recipient isolation, signature forgery rejection, and `vault`
+  deniability (wrong-passphrase and empty-region failures are byte-for-byte
+  identical) (`tests/test.sh`).
 
 These raise confidence; they are **not** a substitute for an independent audit
 (see [SECURITY.md](SECURITY.md)).

@@ -61,11 +61,11 @@ LIBRARY = libqsafe$(LIBEXT)
 SRC_DIR = src
 TEST_DIR = tests
 
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c $(SRC_DIR)/sss.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c $(SRC_DIR)/sss.c $(SRC_DIR)/vault.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = qsafe$(EXEEXT)
 
-TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c
+TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
 TEST_EXECUTABLE = $(TEST_DIR)/test_crypto$(EXEEXT)
 
@@ -103,7 +103,7 @@ $(TEST_EXECUTABLE): $(TEST_OBJECTS)
 # A stable C API around the engine; used by the language bindings (python/).
 lib: $(LIBRARY)
 
-$(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c
+$(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c $(SRC_DIR)/vault.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -fPIC -shared $^ -o $@ \
 		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
@@ -131,6 +131,27 @@ fuzz: $(FUZZ_EXECUTABLE)
 $(FUZZ_EXECUTABLE): $(TEST_DIR)/fuzz_decrypt.c $(SRC_DIR)/crypto_utils.c
 	$(FUZZ_CC) $(CPPFLAGS) -g -O1 -fsanitize=$(FUZZ_SANITIZE) \
 		$(TEST_DIR)/fuzz_decrypt.c $(SRC_DIR)/crypto_utils.c \
+		-o $@ $(LDFLAGS) $(LDLIBS)
+
+# vault (hidden volumes) has its own harness: see tests/fuzz_vault.c for why
+# it fuzzes raw container bytes only, not the (offset, capacity) arithmetic.
+FUZZ_VAULT_EXECUTABLE = $(TEST_DIR)/fuzz_vault
+
+fuzz-vault: $(FUZZ_VAULT_EXECUTABLE)
+
+$(FUZZ_VAULT_EXECUTABLE): $(TEST_DIR)/fuzz_vault.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
+	$(FUZZ_CC) $(CPPFLAGS) -g -O1 -fsanitize=$(FUZZ_SANITIZE) \
+		$(TEST_DIR)/fuzz_vault.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c \
+		-o $@ $(LDFLAGS) $(LDLIBS)
+
+# vault v2 directory parser: attacker-influenced bytes once an anchor decrypts.
+FUZZ_VAULT_DIR_EXECUTABLE = $(TEST_DIR)/fuzz_vault_dir
+
+fuzz-vault-dir: $(FUZZ_VAULT_DIR_EXECUTABLE)
+
+$(FUZZ_VAULT_DIR_EXECUTABLE): $(TEST_DIR)/fuzz_vault_dir.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
+	$(FUZZ_CC) $(CPPFLAGS) -g -O1 -fsanitize=$(FUZZ_SANITIZE) \
+		$(TEST_DIR)/fuzz_vault_dir.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c \
 		-o $@ $(LDFLAGS) $(LDLIBS)
 
 MANDIR ?= $(PREFIX)/share/man/man1

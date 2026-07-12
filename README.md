@@ -31,6 +31,7 @@ Qsafe follows a true public-key workflow: you generate a keypair **once** with `
 - **Embedded sender authentication** — `encrypt --sign-with` seals an ML-DSA-87 signature *inside* the ciphertext; decrypt verifies it automatically and `--signer` pins the expected sender
 - **Size-hiding padding** — `encrypt --pad` rounds the ciphertext to a Padmé bucket so its length reveals only a coarse size class
 - **Shamir key recovery** — `split-key` / `join-key`: split the secret key into n shares, any t of which recover it (lost-passphrase insurance)
+- **Deniable hidden volumes** *(experimental)* — `vault`: a header-less container of pure randomness that holds independently-passphrased slots, so a coerced decoy passphrase can't prove a second, hidden payload exists ([docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md)). A **v2 volume layer** ([docs/HIDDEN_VOLUMES_V2.md](docs/HIDDEN_VOLUMES_V2.md)) adds passphrase-addressed volumes — `vault create`/`add`/`ls`/`extract`/`rm`, where a passphrase alone opens a named directory of slots — whole-container rewrites that make a two-snapshot diff leak nothing, and an optional `--keyfile` second factor so the passphrase alone can't even locate a volume
 - **age ecosystem plugin** — `age-plugin-qsafe` gives every age client (`age`, `rage`, `sops`, `passage`, …) post-quantum `age1qsafe1…` recipients
 - **Detached signatures** — `sign` / `verify-sig` using ML-DSA-87 for sender authenticity
 - **Durable public-key workflow** — generate a keypair once; encrypt with the public key, decrypt with the secret key. Encrypting never overwrites your keys.
@@ -295,6 +296,7 @@ qsafe sign        [options] <input> [signature]
 qsafe verify-sig  [options] <input> [signature]
 qsafe split-key   --threshold <t> --shares <n> [prefix]
 qsafe join-key    <share> <share> [share...]
+qsafe vault       init|write|read|footprint ...    # deniable hidden volumes
 ```
 
 Files and directories are detected automatically — there is no `file|dir`
@@ -317,6 +319,7 @@ input or output to read from stdin / write to stdout.
 | `verify-sig` | Verify a detached signature against a file. |
 | `split-key` | Split the secret key into n Shamir shares, any t of which recover it. |
 | `join-key` | Reconstruct a secret key from shares and re-wrap it under a new passphrase. |
+| `vault` | *(experimental)* Deniable hidden-volume containers: `init` / `write` / `read` / `footprint`. See [docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md). |
 
 ### Options
 
@@ -332,8 +335,10 @@ input or output to read from stdin / write to stdout.
 | `--signer <pk>` | decrypt/verify: require the embedded signer to be this key |
 | `--pad` | encrypt: hide the exact file size (Padmé padding) |
 | `--threshold <t>` / `--shares <n>` | split-key: t-of-n share parameters |
+| `--size <bytes>` | vault init: total container size |
+| `--offset <bytes>` / `--capacity <bytes>` | vault write/read/footprint: slot location and plaintext capacity |
 | `--armor` | encrypt: ASCII base64 output; decrypt: base64 input |
-| `--scrypt-cost <n>` | keygen/rekey: scrypt cost as log2(N), 14–22 (default 15) |
+| `--scrypt-cost <n>` | keygen/rekey/vault: scrypt cost as log2(N), 14–22 (default 15; vault default 20) |
 | `--verbose` | Print detailed information |
 | `--force` | Overwrite existing output without prompting |
 | `--help` | Display usage information |
@@ -432,8 +437,9 @@ make lib             # -> libqsafe.so / libqsafe.dylib / libqsafe.dll
 ```
 
 The C API is in [`include/libqsafe.h`](include/libqsafe.h) (`qsafe_keygen`,
-`qsafe_encrypt`, `qsafe_decrypt`, `qsafe_sign`, `qsafe_verify_signature`, …).
-The Python module wraps it with file and byte-buffer helpers:
+`qsafe_encrypt`, `qsafe_decrypt`, `qsafe_sign`, `qsafe_verify_signature`, and
+the `qsafe_vault_*` deniable-volume calls). The Python module wraps it with
+file and byte-buffer helpers:
 
 ```python
 import qsafe   # python/qsafe.py; set QSAFE_LIB if the library isn't alongside it
@@ -441,6 +447,11 @@ import qsafe   # python/qsafe.py; set QSAFE_LIB if the library isn't alongside i
 qsafe.keygen("sk.bin", "pk.bin", "passphrase")
 blob = qsafe.encrypt_bytes(b"secret", ["pk.bin"])      # bytes in, bytes out
 assert qsafe.decrypt_bytes(blob, "sk.bin", "passphrase") == b"secret"
+
+# deniable hidden-volume (v2) — passphrase alone opens a named slot directory
+qsafe.vault_create("c.bin", "passphrase", 1_500_000)
+qsafe.vault_add("c.bin", "passphrase", "loot", "loot.tar")
+qsafe.vault_extract("c.bin", "passphrase", "loot", "loot.out")
 ```
 
 Errors raise `qsafe.QsafeError`. See `python/test_qsafe.py` for the full surface.

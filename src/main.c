@@ -19,6 +19,7 @@
 #include "age.h"
 #include "keychain.h"
 #include "sss.h"
+#include "vault.h"
 
 #define KEYCHAIN_SERVICE "qsafe"
 
@@ -45,6 +46,15 @@ static void print_usage(void) {
     printf("  %s age-keygen [keyfile]\n", PROGRAM_NAME);
     printf("  %s age-encrypt -r <age1...> <input> [output]\n", PROGRAM_NAME);
     printf("  %s age-decrypt -i <keyfile> <input> [output]\n", PROGRAM_NAME);
+    printf("  %s vault init <path> --size <bytes>\n", PROGRAM_NAME);
+    printf("  %s vault write <path> --offset <n> --capacity <n> <input>\n", PROGRAM_NAME);
+    printf("  %s vault read  <path> --offset <n> --capacity <n> <output>\n", PROGRAM_NAME);
+    printf("  %s vault footprint --capacity <n>\n", PROGRAM_NAME);
+    printf("  %s vault create <path> --size <bytes>          (v2: passphrase-addressed volume)\n", PROGRAM_NAME);
+    printf("  %s vault add <path> <file> --name <s> [--offset <n>] [--capacity <n>]\n", PROGRAM_NAME);
+    printf("  %s vault ls|rm <path> [--name <s>]\n", PROGRAM_NAME);
+    printf("  %s vault extract <path> --name <s> <output>\n", PROGRAM_NAME);
+    printf("  %s vault passwd <path> --new-passphrase-file <p>\n", PROGRAM_NAME);
     printf("\n");
     printf("Commands:\n");
     printf("  keygen       Generate a hybrid X25519 + ML-KEM-1024 keypair (run once)\n");
@@ -62,6 +72,7 @@ static void print_usage(void) {
     printf("  age-keygen   Generate an age (X25519) keypair\n");
     printf("  age-encrypt  Encrypt to age 'age1...' recipients (interop; classical only)\n");
     printf("  age-decrypt  Decrypt an age file with an age identity file (-i)\n");
+    printf("  vault        Deniable hidden-volume containers (experimental; docs/HIDDEN_VOLUMES.md)\n");
     printf("\n");
     printf("Files vs. directories are detected automatically. Use '-' as the input\n");
     printf("or output to read from stdin / write to stdout.\n");
@@ -83,6 +94,13 @@ static void print_usage(void) {
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
     printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS/Windows)\n");
+    printf("  --size <bytes>          vault init/create: total container size\n");
+    printf("  --offset <bytes>        vault write/read: slot offset (vault add: optional; auto-placed if omitted)\n");
+    printf("  --capacity <bytes>      vault write/read/footprint: slot capacity (vault add: optional; exact fit if omitted)\n");
+    printf("  --name <s>              vault add/extract/rm: slot name within a volume\n");
+    printf("  --keep <ppfile>         vault create/add/rm: also preserve this volume (repeatable)\n");
+    printf("  --keyfile <path>        vault v2: require this keyfile as a second factor\n");
+    printf("  --new-passphrase-file <p> vault passwd: file holding the replacement passphrase\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
     printf("  --help                  Display this help message\n");
@@ -439,6 +457,124 @@ static int run_age_command(const char *command, const char *const *positionals, 
     return 0;
 }
 
+/* --------------------------- hidden volumes (vault) -----------------------
+ * Deniable, symmetric-only containers — see docs/HIDDEN_VOLUMES.md. Handled
+ * before the hybrid (X25519 + ML-KEM) engine sets up: vault needs none of it. */
+/* Reads the first line of a passphrase file into out (no echo of secrets to
+ * argv). Strips a trailing newline. Returns 1 on success. */
+static int read_passphrase_file(const char *path, char *out, size_t outsz) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char *r = fgets(out, (int)outsz, f);
+    fclose(f);
+    if (!r) return 0;
+    strip_eol(out);
+    return out[0] != '\0';
+}
+
+static int run_vault_command(const char *const *positionals, int npos,
+                             crypto_config_t *config, const char *cli_passphrase,
+                             const char *passphrase_file, uint64_t vault_size,
+                             uint64_t vault_offset, int vault_offset_set,
+                             uint64_t vault_capacity, int vault_capacity_set,
+                             const char *vault_name, const char *const *vault_keeps, int n_keeps,
+                             const char *vault_new_pp_file,
+                             char *passbuf, size_t passbuf_size) {
+    const char *sub = positionals[0];
+    if (!sub) {
+        fprintf(stderr, "Error: vault <init|create|add|ls|extract|rm|passwd|write|read|footprint> ...\n");
+        return 1;
+    }
+
+    if (strcmp(sub, "init") == 0) {
+        if (npos != 2) { fprintf(stderr, "Error: vault init <path> --size <bytes>\n"); return 1; }
+        if (vault_size == 0) { fprintf(stderr, "Error: vault init requires --size <bytes>\n"); return 1; }
+        return vault_init(positionals[1], vault_size, config->force_overwrite) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    if (strcmp(sub, "footprint") == 0) {
+        if (!vault_capacity_set) { fprintf(stderr, "Error: vault footprint --capacity <bytes>\n"); return 1; }
+        printf("%llu\n", (unsigned long long)vault_ciphertext_len(vault_capacity));
+        return 0;
+    }
+
+    if (strcmp(sub, "write") == 0 || strcmp(sub, "read") == 0) {
+        if (npos != 3) {
+            fprintf(stderr, "Error: vault %s <container> --offset <n> --capacity <n> <input|output>\n", sub);
+            return 1;
+        }
+        if (!vault_offset_set || !vault_capacity_set) {
+            fprintf(stderr, "Error: vault %s requires --offset and --capacity\n", sub);
+            return 1;
+        }
+        if (resolve_passphrase(config, cli_passphrase, passphrase_file, 0, passbuf, passbuf_size) != CRYPTO_SUCCESS) {
+            return 1;
+        }
+        crypto_error_t ret = (strcmp(sub, "write") == 0)
+            ? vault_write(positionals[1], vault_offset, vault_capacity, positionals[2], config)
+            : vault_read(positionals[1], vault_offset, vault_capacity, positionals[2], config);
+        return ret == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    /* --- v2 volume commands (whole-container rewrite) --- */
+    int is_create = strcmp(sub, "create") == 0;
+    int is_add = strcmp(sub, "add") == 0;
+    int is_ls = strcmp(sub, "ls") == 0;
+    int is_extract = strcmp(sub, "extract") == 0;
+    int is_rm = strcmp(sub, "rm") == 0;
+    int is_passwd = strcmp(sub, "passwd") == 0;
+
+    if (is_create || is_add || is_ls || is_extract || is_rm || is_passwd) {
+        if (npos < 2) { fprintf(stderr, "Error: vault %s needs a container path\n", sub); return 1; }
+        const char *container = positionals[1];
+
+        if (resolve_passphrase(config, cli_passphrase, passphrase_file, is_create, passbuf, passbuf_size) != CRYPTO_SUCCESS)
+            return 1;
+
+        /* Resolve --keep passphrase files into strings (volumes to preserve). */
+        char keepbuf[16][MAX_PASSPHRASE];
+        const char *keeps[16];
+        for (int k = 0; k < n_keeps; k++) {
+            if (!read_passphrase_file(vault_keeps[k], keepbuf[k], sizeof(keepbuf[k]))) {
+                fprintf(stderr, "Error: cannot read --keep passphrase file '%s'\n", vault_keeps[k]);
+                return 1;
+            }
+            keeps[k] = keepbuf[k];
+        }
+
+        crypto_error_t ret;
+        if (is_create) {
+            ret = vault_volume_create(container, vault_size, config, config->force_overwrite, keeps, n_keeps);
+        } else if (is_ls) {
+            ret = vault_volume_ls(container, config);
+        } else if (is_extract) {
+            if (!vault_name || npos < 3) { fprintf(stderr, "Error: vault extract <container> --name <s> <output>\n"); return 1; }
+            ret = vault_volume_extract(container, vault_name, positionals[2], config);
+        } else if (is_add) {
+            if (!vault_name || npos < 3) { fprintf(stderr, "Error: vault add <container> <file> --name <s> [--offset <n>] [--capacity <n>]\n"); return 1; }
+            ret = vault_volume_add(container, vault_name, positionals[2],
+                                   vault_offset, vault_offset_set,
+                                   vault_capacity, vault_capacity_set, config, keeps, n_keeps);
+        } else if (is_rm) {
+            if (!vault_name) { fprintf(stderr, "Error: vault rm <container> --name <s>\n"); return 1; }
+            ret = vault_volume_rm(container, vault_name, config, keeps, n_keeps);
+        } else { /* is_passwd */
+            if (!vault_new_pp_file) { fprintf(stderr, "Error: vault passwd <container> --new-passphrase-file <path>\n"); return 1; }
+            char newpp[MAX_PASSPHRASE];
+            if (!read_passphrase_file(vault_new_pp_file, newpp, sizeof(newpp))) {
+                fprintf(stderr, "Error: cannot read --new-passphrase-file '%s'\n", vault_new_pp_file);
+                return 1;
+            }
+            ret = vault_volume_passwd(container, config, newpp, keeps, n_keeps);
+            OPENSSL_cleanse(newpp, sizeof(newpp));
+        }
+        return ret == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    fprintf(stderr, "Error: unknown vault subcommand '%s'\n", sub);
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
      * by CRLF translation. No-op on POSIX. */
@@ -465,6 +601,7 @@ int main(int argc, char *argv[]) {
     config.sign_pk_file = NULL;
     config.signer_pk_file = NULL;
     config.pad = 0;
+    config.vault_keyfile_key = NULL;
 
     const char *command = NULL;
     const char *cli_passphrase = NULL;
@@ -473,6 +610,15 @@ int main(int argc, char *argv[]) {
     unsigned int sss_threshold = 0;     /* split-key: --threshold */
     unsigned int sss_shares = 0;        /* split-key: --shares */
     const char *pub_file_opt = NULL;
+    uint64_t vault_size = 0;            /* vault init: --size */
+    uint64_t vault_offset = 0;          /* vault write/read: --offset */
+    uint64_t vault_capacity = 0;        /* vault write/read/footprint: --capacity */
+    int vault_offset_set = 0, vault_capacity_set = 0;
+    const char *vault_name = NULL;      /* vault add/extract/rm: --name */
+    const char *vault_keeps[16];        /* vault create/add/rm: --keep passphrase files */
+    int n_vault_keeps = 0;
+    const char *vault_keyfile_path = NULL; /* vault v2: --keyfile (two-factor) */
+    const char *vault_new_pp_file = NULL;  /* vault passwd: --new-passphrase-file */
     const char *identity_name = NULL;
     const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
     const char *positionals[16] = { NULL };  /* join-key takes up to 16 shares */
@@ -564,6 +710,41 @@ int main(int argc, char *argv[]) {
             config.scrypt_n = 1ULL << logn;
             config.scrypt_r = SCRYPT_DEFAULT_R;
             config.scrypt_p = SCRYPT_DEFAULT_P;
+        } else if (strcmp(a, "--size") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --size requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --size must be a byte count\n"); return 1; }
+            vault_size = (uint64_t)v;
+        } else if (strcmp(a, "--offset") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --offset requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --offset must be a byte count\n"); return 1; }
+            vault_offset = (uint64_t)v;
+            vault_offset_set = 1;
+        } else if (strcmp(a, "--capacity") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --capacity requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --capacity must be a byte count\n"); return 1; }
+            vault_capacity = (uint64_t)v;
+            vault_capacity_set = 1;
+        } else if (strcmp(a, "--name") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --name requires a value\n"); return 1; }
+            vault_name = argv[i];
+        } else if (strcmp(a, "--keyfile") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --keyfile requires a path\n"); return 1; }
+            vault_keyfile_path = argv[i];
+        } else if (strcmp(a, "--new-passphrase-file") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --new-passphrase-file requires a path\n"); return 1; }
+            vault_new_pp_file = argv[i];
+        } else if (strcmp(a, "--keep") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --keep requires a passphrase file\n"); return 1; }
+            if (n_vault_keeps >= (int)(sizeof(vault_keeps) / sizeof(vault_keeps[0]))) {
+                fprintf(stderr, "Error: too many --keep files\n"); return 1;
+            }
+            vault_keeps[n_vault_keeps++] = argv[i];
         } else if (a[0] == '-' && a[1] == '-') {
             fprintf(stderr, "Error: unknown option '%s'\n", a);
             return 1;
@@ -600,10 +781,11 @@ int main(int argc, char *argv[]) {
     int is_age_keygen = strcmp(command, "age-keygen") == 0;
     int is_age_encrypt = strcmp(command, "age-encrypt") == 0;
     int is_age_decrypt = strcmp(command, "age-decrypt") == 0;
+    int is_vault = strcmp(command, "vault") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
         !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys &&
         !is_split_key && !is_join_key &&
-        !is_age_keygen && !is_age_encrypt && !is_age_decrypt) {
+        !is_age_keygen && !is_age_encrypt && !is_age_decrypt && !is_vault) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
         return 1;
@@ -614,6 +796,27 @@ int main(int argc, char *argv[]) {
     if (is_age_keygen || is_age_encrypt || is_age_decrypt) {
         return run_age_command(command, positionals, npos,
                                recipient_opts, n_recipient_opts, identity_file);
+    }
+
+    /* vault (hidden volumes) is a second, symmetric-only container format —
+     * see docs/HIDDEN_VOLUMES.md — with no dependency on the hybrid identity
+     * system either, so it is handled before OQS_KEM init too. */
+    if (is_vault) {
+        char passbuf_vault[MAX_PASSPHRASE];
+        memset(passbuf_vault, 0, sizeof(passbuf_vault));
+        unsigned char vault_keyfile_key[32];
+        if (vault_keyfile_path) {
+            if (vault_keyfile_from_file(vault_keyfile_path, vault_keyfile_key) != CRYPTO_SUCCESS) {
+                fprintf(stderr, "Error: cannot read --keyfile '%s'\n", vault_keyfile_path);
+                return 1;
+            }
+            config.vault_keyfile_key = vault_keyfile_key;
+        }
+        return run_vault_command(positionals, npos, &config, cli_passphrase, passphrase_file,
+                                 vault_size, vault_offset, vault_offset_set,
+                                 vault_capacity, vault_capacity_set,
+                                 vault_name, vault_keeps, n_vault_keeps, vault_new_pp_file,
+                                 passbuf_vault, sizeof(passbuf_vault));
     }
 
     /* verify is decrypt that authenticates but writes nothing. */

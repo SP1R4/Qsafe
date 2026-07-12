@@ -10,6 +10,7 @@
 #include <oqs/oqs.h>
 #include "crypto_utils.h"
 #include "libqsafe.h"
+#include "vault.h"
 
 #define QSAFE_LIB_VERSION "8.0.0"
 
@@ -152,4 +153,49 @@ qsafe_status qsafe_verify_signature(const char *in_path, const char *sig_path,
     crypto_config_t cfg;
     base_config(&cfg, NULL);
     return map_err(crypto_verify_signature(in_path, sig_path, sign_public_path, &cfg));
+}
+
+/* --- vault v2 (deniable passphrase-addressed volumes) --- */
+
+static void vault_config(crypto_config_t *c, const char *passphrase, unsigned scrypt_log_n) {
+    base_config(c, passphrase);
+    if (scrypt_log_n >= 14 && scrypt_log_n <= 22) {
+        c->scrypt_n = 1ULL << scrypt_log_n;
+        c->scrypt_r = SCRYPT_DEFAULT_R;
+        c->scrypt_p = SCRYPT_DEFAULT_P;
+    }
+    /* else scrypt_n stays 0 → vault applies its own (higher) default cost. */
+}
+
+qsafe_status qsafe_vault_create(const char *container_path, const char *passphrase,
+                                unsigned long long size, unsigned scrypt_log_n) {
+    if (!container_path || !passphrase || !*passphrase || size == 0) return QSAFE_ERR_INPUT;
+    crypto_config_t cfg;
+    vault_config(&cfg, passphrase, scrypt_log_n);
+    return map_err(vault_volume_create(container_path, (uint64_t)size, &cfg, 1, NULL, 0));
+}
+
+qsafe_status qsafe_vault_add(const char *container_path, const char *passphrase,
+                             const char *name, const char *in_path, unsigned scrypt_log_n) {
+    if (!container_path || !passphrase || !name || !in_path) return QSAFE_ERR_INPUT;
+    crypto_config_t cfg;
+    vault_config(&cfg, passphrase, scrypt_log_n);
+    /* have_offset = have_capacity = 0 -> auto-placed, exact-fit capacity. */
+    return map_err(vault_volume_add(container_path, name, in_path, 0, 0, 0, 0, &cfg, NULL, 0));
+}
+
+qsafe_status qsafe_vault_extract(const char *container_path, const char *passphrase,
+                                 const char *name, const char *out_path, unsigned scrypt_log_n) {
+    if (!container_path || !passphrase || !name || !out_path) return QSAFE_ERR_INPUT;
+    crypto_config_t cfg;
+    vault_config(&cfg, passphrase, scrypt_log_n);
+    return map_err(vault_volume_extract(container_path, name, out_path, &cfg));
+}
+
+qsafe_status qsafe_vault_remove(const char *container_path, const char *passphrase,
+                                const char *name, unsigned scrypt_log_n) {
+    if (!container_path || !passphrase || !name) return QSAFE_ERR_INPUT;
+    crypto_config_t cfg;
+    vault_config(&cfg, passphrase, scrypt_log_n);
+    return map_err(vault_volume_rm(container_path, name, &cfg, NULL, 0));
 }

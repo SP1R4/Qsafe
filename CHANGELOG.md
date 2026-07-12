@@ -6,6 +6,71 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Deniable hidden volumes** (`qsafe vault init|write|read|footprint`,
+  *experimental*): a header-less container of pure CSPRNG randomness holding
+  independently-passphrased slots at caller-chosen `(offset, capacity)`
+  coordinates. A slot's ciphertext is indistinguishable from the surrounding
+  random filler, so a coerced decoy passphrase cannot prove a second, hidden
+  payload exists. Symmetric/passphrase-only and deliberately separate from the
+  QSAFE007 public-key container — ML-KEM ciphertext is not proven
+  indistinguishable from random, so it cannot back a deniable format. Reuses
+  the audited framed-AEAD primitives and scrypt KDF; wrong-passphrase and
+  empty-region reads are byte-for-byte indistinguishable. Full design,
+  format, and threat model in [docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md).
+
+- **Vault v2 — passphrase-addressed volumes** (`vault create|add|ls|extract|rm`,
+  *experimental*, [docs/HIDDEN_VOLUMES_V2.md](docs/HIDDEN_VOLUMES_V2.md)): a
+  passphrase alone locates its **anchor** (a slot at a passphrase-derived
+  offset) whose encrypted **directory** lists that volume's named slots — so v2
+  no longer requires remembering per-slot `(offset, capacity)`. Every mutating
+  command is a **whole-container rewrite**: the entire file is re-randomized and
+  each preserved slot re-sealed under a fresh per-write nonce salt, so a
+  byte-level diff of two container snapshots leaks nothing (closing v1's
+  two-snapshot weakness). A write preserves only the volumes whose passphrase it
+  is given (target + `--keep`); omitting one destroys it (the VeraCrypt
+  outer-clobbers-hidden tension, made explicit). Adds an exported
+  `crypto_hkdf_sha256` (general HKDF with explicit salt/info).
+- **Vault v2 two-factor keyfile** (`--keyfile <path>`): mixes a
+  `SHA-256`-derived keyfile key into both the anchor-location and slot-key
+  derivations, so the passphrase alone can neither find nor open a volume — both
+  factors are independently required. Opt-in and backward-compatible: with no
+  keyfile, every derivation is byte-identical to before. The anchor-offset
+  reduction was also changed to a constant-time Lemire multiply-shift (from a
+  data-dependent `x mod m`).
+- **Vault v2 `passwd`** (`vault passwd <container> --new-passphrase-file`):
+  changes a volume's passphrase in place — reads the volume under the current
+  passphrase and re-seals its slots and relocates its anchor under the new one,
+  in one whole-container rewrite, so the old passphrase opens nothing
+  afterward. Slot content and `--keep` volumes are preserved.
+- **Vault v2 auto-placement**: `vault add`'s `--offset` and `--capacity` are now
+  optional. Capacity defaults to an exact fit for the content; the offset is
+  auto-chosen as the lowest free gap avoiding every slot/anchor the command can
+  see (the target volume's and each `--keep` volume's). Explicit
+  `--offset`/`--capacity` still work for manual placement.
+- **Vault v2 in libqsafe + Python**: `qsafe_vault_create` / `_add` / `_extract`
+  / `_remove` (single-volume, no-keyfile) exposed through the C API and the
+  Python module (`qsafe.vault_create`/`vault_add`/`vault_extract`/`vault_remove`),
+  so volumes are embeddable, not CLI-only.
+- **Vault v2 overflow directories**: a volume can now hold up to 181 slots (was
+  46). When a directory block fills, the block spends one record on a
+  flag-marked pointer to a chained overflow block. No format-version bump — a
+  volume of ≤ 46 slots serializes byte-identically to before, so existing
+  containers, the frozen fixture, and the directory KAT are unaffected.
+- **Man page + shell completions** now cover every `vault` subcommand and option.
+
+### Assurance
+- Vault known-answer tests (salt derivation, `ciphertext_len`, frame AEAD with
+  coordinate AAD, scrypt), a frozen fixture container, deniability integration
+  tests, a dedicated fuzz harness (`tests/fuzz_vault.c`, `make fuzz-vault`,
+  wired into `fuzz.yml`/`hardening.yml`/OSS-Fuzz), and constant-time coverage
+  of the AES-GCM frame key and vault-cost scrypt (`tests/ct_check.c`).
+- Vault v2 KATs (anchor offset, v2 slot frame key, directory serialization,
+  RFC 5869 HKDF vector), directory parser hostile-input rejections, and
+  integration tests including a direct check that a mutating write re-randomizes
+  ≥99% of the container (the snapshot-diff property) and that `--keep` preserves
+  while omission destroys — all clean under ASan/UBSan.
+
 ## [8.0.0] - 2026-07-02
 
 The write format moves to **QSAFE007** (decrypt still reads QSAFE006/005, so

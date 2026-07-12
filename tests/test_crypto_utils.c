@@ -5,6 +5,7 @@
 #include <openssl/rand.h>
 #include <openssl/evp.h>
 #include "crypto_utils.h"
+#include "vault.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -361,6 +362,24 @@ static void test_known_answer_vectors(void) {
     ASSERT(strcmp(hex, "23007a6fb81fbb59d3d85ec00e26c634a8d9aaf77d6b0ba78da66394a875a62a") == 0,
            "HKDF-SHA256 derived key matches known answer");
 
+    /* (2b) General HKDF (crypto_hkdf_sha256) against RFC 5869 Test Case 1 —
+     *      the canonical HKDF-SHA256 vector, so this pins the new exported
+     *      primitive to the standard, not just to itself. */
+    {
+        char hex84[85];
+        unsigned char ikm[22], rfc_salt[13], info[10], okm[42];
+        memset(ikm, 0x0b, sizeof(ikm));
+        for (int i = 0; i < 13; i++) rfc_salt[i] = (unsigned char)i;        /* 00..0c */
+        for (int i = 0; i < 10; i++) info[i] = (unsigned char)(0xf0 + i);   /* f0..f9 */
+        ASSERT(crypto_hkdf_sha256(ikm, sizeof(ikm), rfc_salt, sizeof(rfc_salt),
+                                  info, sizeof(info), okm, sizeof(okm)) == CRYPTO_SUCCESS,
+               "crypto_hkdf_sha256 RFC 5869 TC1 computes");
+        to_hex(okm, sizeof(okm), hex84);
+        ASSERT(strcmp(hex84, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+                             "34007208d5b887185865") == 0,
+               "crypto_hkdf_sha256 matches RFC 5869 Test Case 1");
+    }
+
     /* (3) scrypt (crypto_derive_key_from_passphrase) pass="hunter2",
      *     salt = 16 bytes of 0x11, N=2^15, r=8, p=1 -> fixed 32-byte key. */
     unsigned char salt[KDF_SALT_SIZE];
@@ -465,6 +484,355 @@ static void test_v7_known_answer_vectors(void) {
     }
 }
 
+/* u64le packing matching vault.c's on-disk coordinate encoding (offset(8) ||
+ * capacity(8), little-endian) — needed here only to reconstruct the salt
+ * KAT's input bytes, not to duplicate vault.c's derivation logic. */
+static void u64le(uint64_t v, unsigned char out[8]) {
+    for (int i = 0; i < 8; i++) out[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+}
+
+/* Known-answer vectors for qsafe vault (docs/HIDDEN_VOLUMES.md). Two kinds:
+ *  - genuinely internal, not-exported pieces (the salt formula) are pinned by
+ *    reimplementing them here from raw primitives, with expected values
+ *    computed independently in Python (hashlib + `cryptography`);
+ *  - pieces vault.c actually calls through the public API
+ *    (crypto_frame_nonce/crypto_gcm_seal_aad, crypto_derive_key_from_passphrase,
+ *    vault_ciphertext_len) are exercised through that same API, so these KATs
+ *    catch a regression in the real production code path, not a reimplementation
+ *    of it. */
+static void test_vault_known_answer_vectors(void) {
+    printf("\n[test_vault_known_answer_vectors]\n");
+    char hex[65];
+
+    /* (1) Salt formula: SHA-256("qsafe-vault-salt-v1" || u64le(offset) ||
+     *     u64le(capacity))[0:16]. Not exported (see HIDDEN_VOLUMES.md §5 —
+     *     a vault slot has no on-disk header, so nothing about its derivation
+     *     can be a callable "load the salt" API); reimplemented from raw
+     *     EVP_Digest here purely to pin the formula against an independent
+     *     Python computation. */
+    {
+        const char *ctx = "qsafe-vault-salt-v1";
+        unsigned char coords[16];
+        u64le(0, coords);
+        u64le(1048576, coords + 8);
+        unsigned char ikm[64];
+        size_t ctxlen = strlen(ctx);
+        memcpy(ikm, ctx, ctxlen);
+        memcpy(ikm + ctxlen, coords, sizeof(coords));
+        unsigned char digest[32];
+        unsigned int dlen = 0;
+        ASSERT(EVP_Digest(ikm, ctxlen + sizeof(coords), digest, &dlen, EVP_sha256(), NULL) == 1 && dlen == 32,
+               "vault salt KAT computes");
+        to_hex(digest, 16, hex);
+        ASSERT(strcmp(hex, "9fb1dfff5f34ff36f18bc003b5ef265a") == 0,
+               "vault salt (offset=0, capacity=1048576) matches known answer");
+
+        u64le(1200000, coords);
+        u64le(100000, coords + 8);
+        memcpy(ikm + ctxlen, coords, sizeof(coords));
+        ASSERT(EVP_Digest(ikm, ctxlen + sizeof(coords), digest, &dlen, EVP_sha256(), NULL) == 1 && dlen == 32,
+               "vault salt KAT (2nd coordinate pair) computes");
+        to_hex(digest, 16, hex);
+        ASSERT(strcmp(hex, "c8c524e2d4412156a8cc014a2bf34825") == 0,
+               "vault salt (offset=1200000, capacity=100000) matches known answer "
+               "(differs from the first: coordinates domain-separate the salt)");
+    }
+
+    /* (2) vault_ciphertext_len (the real exported function, not a
+     *     reimplementation): capacity + 16 * (capacity / 65536 + 1). */
+    {
+        static const struct { uint64_t cap, len; } cases[] = {
+            { 9, 25 }, { 65536, 65568 }, { 65537, 65569 },
+            { 1048576, 1048848 }, { 100000, 100032 },
+        };
+        int all = 1;
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            if (vault_ciphertext_len(cases[i].cap) != cases[i].len) all = 0;
+        }
+        ASSERT(all, "vault_ciphertext_len matches known answers");
+    }
+
+    /* (3) Frame AEAD through the actual exported functions vault.c calls:
+     *     crypto_frame_nonce(counter=0, final=1) and crypto_gcm_seal_aad,
+     *     key = bytes 0x00..0x1f, aad = coords(offset=0, capacity=32),
+     *     plaintext = "Qsafe frame KAT". A regression here is a regression
+     *     in the code vault.c actually runs. */
+    {
+        unsigned char key[32];
+        for (int i = 0; i < 32; i++) key[i] = (unsigned char)i;
+        unsigned char nonce[AES_GCM_NONCE_SIZE];
+        crypto_frame_nonce(0, 1, nonce);
+        unsigned char aad[16];
+        u64le(0, aad);
+        u64le(32, aad + 8);
+        const unsigned char pt[] = "Qsafe frame KAT"; /* 15 bytes, no NUL */
+        unsigned char ct[15], tag[AES_GCM_TAG_SIZE];
+        ASSERT(crypto_gcm_seal_aad(key, nonce, aad, sizeof(aad), pt, 15, ct, tag) == 1,
+               "vault-style frame AEAD KAT computes");
+        char cthex[2 * (15 + AES_GCM_TAG_SIZE) + 1];
+        to_hex(ct, 15, cthex);
+        to_hex(tag, AES_GCM_TAG_SIZE, cthex + 30);
+        ASSERT(strcmp(cthex, "44a5de9a21d4566c6f433419a7e76ec08684b806c43bd1c4ba0042085d578a") == 0,
+               "vault-style frame 0 (final, coords AAD) matches known answer");
+
+        /* Opening it back through crypto_gcm_open_aad must round-trip, and
+         * must fail under the "HDR" AAD the main QSAFE007 path uses instead
+         * — confirming the two formats' AADs don't cross-authenticate. */
+        unsigned char pt_out[15];
+        ASSERT(crypto_gcm_open_aad(key, nonce, aad, sizeof(aad), ct, 15, tag, pt_out) == 1 &&
+               memcmp(pt, pt_out, 15) == 0,
+               "vault-style frame AEAD opens back to the original plaintext");
+        ASSERT(crypto_gcm_open_aad(key, nonce, (const unsigned char *)"HDR", 3, ct, 15, tag, pt_out) == 0,
+               "vault coords AAD does not authenticate under the QSAFE007 \"HDR\" AAD");
+    }
+
+    /* (4) scrypt at vault's minimum allowed cost (N=2^14, used by the fixture
+     *     container in tests/fixtures/vault/ to keep CI fast) through the
+     *     same exported crypto_derive_key_from_passphrase the main format
+     *     already pins at N=2^15 above. */
+    {
+        unsigned char salt[KDF_SALT_SIZE];
+        memset(salt, 0x11, sizeof(salt));
+        unsigned char key[AES_KEY_SIZE];
+        ASSERT(crypto_derive_key_from_passphrase("hunter2", salt, 1ULL << 14, 8, 1, key) == CRYPTO_SUCCESS,
+               "scrypt KAT (N=2^14) computes");
+        to_hex(key, sizeof(key), hex);
+        ASSERT(strcmp(hex, "ba224982dfaabd0d8d1336ef6482b654f989b93af1ee85e118941b397dd54297") == 0,
+               "scrypt (N=2^14) derived key matches known answer");
+    }
+}
+
+/* Known-answer vectors for the vault v2 (anchor + directory) building blocks —
+ * docs/HIDDEN_VOLUMES_V2.md. Exercised through the actual exported functions
+ * (vault_slot_len, vault_v2_frame_key, vault_anchor_offset), with expected
+ * values computed independently in Python (hashlib + `cryptography`'s Scrypt
+ * and HKDF), so a regression is caught in the real derivation, not a
+ * reimplementation. Costs are pinned at N=2^14 to stay fast. */
+static void test_vault_v2_known_answer_vectors(void) {
+    printf("\n[test_vault_v2_known_answer_vectors]\n");
+    char hex[65];
+
+    /* (1) v2 slot on-disk length = 16-byte nonce salt + framed ciphertext. */
+    {
+        ASSERT(vault_slot_len(4096) == 4128, "vault_slot_len(4096) == 4128 (anchor span)");
+        ASSERT(vault_slot_len(9) == 16 + 25, "vault_slot_len(9) == 41");
+        ASSERT(vault_slot_len(65536) == 16 + 65568, "vault_slot_len(65536) == 65584");
+    }
+
+    /* (2) v2 slot frame key: HKDF(scrypt(pass, coord_salt(0,1048576), N=2^14),
+     *     salt = nonce_salt(0x00..0x0f), info = "qsafe-vault-slot-v2"). */
+    {
+        crypto_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.passphrase = "vault-v2-kat-pass";
+        cfg.scrypt_n = 1ULL << 14;
+        cfg.scrypt_r = 8;
+        cfg.scrypt_p = 1;
+        unsigned char nonce_salt[VAULT_NONCE_SALT_SIZE];
+        for (int i = 0; i < VAULT_NONCE_SALT_SIZE; i++) nonce_salt[i] = (unsigned char)i;
+        unsigned char key[AES_KEY_SIZE];
+        ASSERT(vault_v2_frame_key(&cfg, 0, 1048576, nonce_salt, key) == 1,
+               "vault_v2_frame_key computes");
+        to_hex(key, sizeof(key), hex);
+        ASSERT(strcmp(hex, "42b46cf77079791c9e0cc9057597759d88f7c41cb3571690984c4a95b6e8e2e2") == 0,
+               "v2 slot frame key matches known answer");
+
+        /* A different nonce salt must yield a different key — the property the
+         * per-write salt exists for. */
+        unsigned char nonce_salt2[VAULT_NONCE_SALT_SIZE];
+        memset(nonce_salt2, 0xAA, sizeof(nonce_salt2));
+        unsigned char key2[AES_KEY_SIZE];
+        ASSERT(vault_v2_frame_key(&cfg, 0, 1048576, nonce_salt2, key2) == 1 &&
+               memcmp(key, key2, AES_KEY_SIZE) != 0,
+               "a different nonce salt yields a different frame key");
+    }
+
+    /* (3) Anchor offset: end-to-end at N=2^14 for a 10,000,000-byte container.
+     *     Pins the whole pipeline (scrypt over the fixed anchor-loc salt, HKDF
+     *     mixing in the container size, and the modular reduction). */
+    {
+        uint64_t off = 0;
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 10000000, 1ULL << 14, 8, 1, NULL, &off) == CRYPTO_SUCCESS,
+               "vault_anchor_offset computes");
+        ASSERT(off == 5631317, "anchor offset matches known answer (Lemire multiply-shift reduction)");
+        ASSERT(off + vault_slot_len(VAULT_ANCHOR_CAPACITY) <= 10000000,
+               "anchor slot fits inside the container");
+
+        /* A different container size relocates the anchor (size is mixed into
+         * the derivation), and a container too small to hold an anchor fails. */
+        uint64_t off2 = 0;
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 20000000, 1ULL << 14, 8, 1, NULL, &off2) == CRYPTO_SUCCESS &&
+               off2 != 1389354,
+               "a different container size relocates the anchor");
+        uint64_t off3 = 0;
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 1000, 1ULL << 14, 8, 1, NULL, &off3) == CRYPTO_ERR_INVALID_INPUT,
+               "a container too small for an anchor is rejected");
+    }
+}
+
+/* Builds a directory entry with a C-string name. */
+static vault_entry_t mk_entry(uint64_t off, uint64_t cap, uint8_t logn, uint8_t flags, const char *name) {
+    vault_entry_t e;
+    memset(&e, 0, sizeof(e));
+    e.offset = off; e.capacity = cap; e.scrypt_log_n = logn; e.flags = flags;
+    e.name_len = (uint16_t)strlen(name);
+    memcpy(e.name, name, e.name_len);
+    return e;
+}
+
+/* Volume directory (docs/HIDDEN_VOLUMES_V2.md §3): serialization KAT, the
+ * hostile-input rejections the parser must enforce, add/find/remove, and an
+ * end-to-end round-trip through the real v2 slot seal/open. */
+static void test_vault_directory(void) {
+    printf("\n[test_vault_directory]\n");
+
+    vault_dir_t dir;
+    memset(&dir, 0, sizeof(dir));
+    dir.version = VAULT_DIR_VERSION;
+    dir.entry_count = 2;
+    dir.entries[0] = mk_entry(140048, 100000, 20, 0, "decoy");
+    dir.entries[1] = mk_entry(500000, 50000, 14, 1, "hidden");
+
+    /* (1) Serialization KAT: the deterministic header+entries region (the
+     *     padding is random) hashes to a value computed independently in
+     *     Python. */
+    unsigned char block[VAULT_ANCHOR_CAPACITY];
+    ASSERT(vault_dir_serialize(&dir, block) == 1, "directory serializes");
+    {
+        size_t region = VAULT_DIR_HEADER + (size_t)dir.entry_count * VAULT_ENTRY_SIZE;
+        unsigned char digest[32]; unsigned int dlen = 0; char hex[65];
+        EVP_Digest(block, region, digest, &dlen, EVP_sha256(), NULL);
+        to_hex(digest, 32, hex);
+        ASSERT(strcmp(hex, "c3d724acf8b88fdbf90d78d5c5c81274f1ea039177c116c008ce206e327f4b34") == 0,
+               "serialized header+entries region matches known answer");
+    }
+
+    /* (2) Round-trip: parse the block back and compare fields. */
+    {
+        vault_dir_t got;
+        memset(&got, 0, sizeof(got));
+        ASSERT(vault_dir_parse(block, &got) == 1, "directory parses back");
+        ASSERT(got.version == VAULT_DIR_VERSION && got.entry_count == 2, "version and count round-trip");
+        ASSERT(got.entries[1].offset == 500000 && got.entries[1].capacity == 50000 &&
+               got.entries[1].scrypt_log_n == 14 && got.entries[1].flags == 1 &&
+               got.entries[1].name_len == 6 && memcmp(got.entries[1].name, "hidden", 6) == 0,
+               "second entry round-trips field-for-field");
+    }
+
+    /* (3) Hostile-input rejection — every attacker-influenced field is bounded.
+     *     Start from a valid block and corrupt one field at a time. */
+    {
+        unsigned char bad[VAULT_ANCHOR_CAPACITY];
+        vault_dir_t out;
+
+        memcpy(bad, block, sizeof(bad));
+        bad[0] = 0x09;                                  /* wrong version */
+        ASSERT(vault_dir_parse(bad, &out) == 0, "rejects a wrong directory version");
+
+        memcpy(bad, block, sizeof(bad));
+        bad[2] = 0xff; bad[3] = 0xff;                   /* entry_count = 65535 > MAX */
+        ASSERT(vault_dir_parse(bad, &out) == 0, "rejects an entry_count over the maximum");
+
+        memcpy(bad, block, sizeof(bad));
+        bad[VAULT_DIR_HEADER + 18] = 0xff;              /* entry 0 name_len = 255 > 64 */
+        bad[VAULT_DIR_HEADER + 19] = 0x00;
+        ASSERT(vault_dir_parse(bad, &out) == 0, "rejects a name_len over the maximum");
+
+        memcpy(bad, block, sizeof(bad));
+        bad[VAULT_DIR_HEADER + 16] = 0x02;              /* entry 0 scrypt_log_n = 2 (< 14) */
+        ASSERT(vault_dir_parse(bad, &out) == 0, "rejects an out-of-range scrypt cost");
+
+        memcpy(bad, block, sizeof(bad));
+        memset(bad + VAULT_DIR_HEADER + 8, 0, 8);       /* entry 0 capacity = 0 (< MIN) */
+        ASSERT(vault_dir_parse(bad, &out) == 0, "rejects a capacity below the minimum");
+    }
+
+    /* (4) find / add / remove. */
+    {
+        vault_dir_t d;
+        memset(&d, 0, sizeof(d));
+        d.version = VAULT_DIR_VERSION;
+        vault_entry_t a = mk_entry(1000, 20000, 18, 0, "alpha");
+        vault_entry_t b = mk_entry(90000, 30000, 18, 0, "bravo");
+        ASSERT(vault_dir_add(&d, &a) == 1 && vault_dir_add(&d, &b) == 1, "adds two entries");
+        ASSERT(vault_dir_add(&d, &a) == 0, "rejects a duplicate name");
+        ASSERT(vault_dir_find(&d, "bravo") == 1 && vault_dir_find(&d, "missing") == -1, "finds by name");
+        ASSERT(vault_dir_remove(&d, "alpha") == 1 && d.entry_count == 1 &&
+               vault_dir_find(&d, "bravo") == 0, "removes and compacts");
+    }
+
+    /* (4b) Overflow-pointer entry (§3.1): the flag mechanism a directory chain
+     *      is built on. An entry with VAULT_ENTRY_FLAG_OVERFLOW must serialize
+     *      and parse back with the flag intact (so a reader can distinguish a
+     *      next-block pointer from a data slot), and the in-memory dir cap is
+     *      VAULT_MAX_VOL_ENTRIES, not the per-block 46. */
+    {
+        vault_dir_t ov;
+        memset(&ov, 0, sizeof(ov));
+        ov.version = VAULT_DIR_VERSION;
+        ov.entry_count = 2;
+        ov.entries[0] = mk_entry(1000, 20000, 18, 0, "data");
+        ov.entries[1] = mk_entry(700000, VAULT_ANCHOR_CAPACITY, 14, VAULT_ENTRY_FLAG_OVERFLOW, "");
+        unsigned char blk[VAULT_ANCHOR_CAPACITY];
+        vault_dir_t got;
+        memset(&got, 0, sizeof(got));
+        ASSERT(vault_dir_serialize(&ov, blk) == 1 && vault_dir_parse(blk, &got) == 1,
+               "a block with an overflow-pointer entry serializes and parses");
+        ASSERT((got.entries[1].flags & VAULT_ENTRY_FLAG_OVERFLOW) &&
+               got.entries[1].offset == 700000 && got.entries[1].capacity == VAULT_ANCHOR_CAPACITY,
+               "the overflow-pointer entry round-trips with its flag and target");
+        ASSERT(VAULT_MAX_VOL_ENTRIES > VAULT_MAX_ENTRIES,
+               "the in-memory directory spans more than one block");
+    }
+
+    /* (5) End-to-end: serialize a directory, seal it into an anchor-sized v2
+     *     slot, open it back, and parse — exercising the real v2 seal/open and
+     *     confirming a wrong passphrase fails to open. */
+    {
+        crypto_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.passphrase = "vault-dir-e2e-pass";
+        cfg.scrypt_n = 1ULL << 14; cfg.scrypt_r = 8; cfg.scrypt_p = 1;
+
+        unsigned char plain[VAULT_ANCHOR_CAPACITY];
+        ASSERT(vault_dir_serialize(&dir, plain) == 1, "e2e: serialize directory");
+
+        unsigned char *slot = malloc(vault_slot_len(VAULT_ANCHOR_CAPACITY));
+        unsigned char *recovered = malloc(VAULT_ANCHOR_CAPACITY);
+        ASSERT(slot && recovered, "e2e: allocate slot buffers");
+        if (slot && recovered) {
+            uint64_t off = 4096; /* arbitrary anchor location for the test */
+            ASSERT(vault_v2_seal(slot, off, VAULT_ANCHOR_CAPACITY, &cfg, plain) == 1, "e2e: seal anchor slot");
+            ASSERT(vault_v2_open(slot, off, VAULT_ANCHOR_CAPACITY, &cfg, recovered) == 1, "e2e: open anchor slot");
+            ASSERT(memcmp(plain, recovered, VAULT_ANCHOR_CAPACITY) == 0, "e2e: recovered plaintext matches");
+
+            vault_dir_t got;
+            memset(&got, 0, sizeof(got));
+            ASSERT(vault_dir_parse(recovered, &got) == 1 && got.entry_count == 2 &&
+                   memcmp(got.entries[0].name, "decoy", 5) == 0,
+                   "e2e: recovered directory parses with the right entries");
+
+            /* Sealing again yields different bytes (fresh nonce salt), but the
+             * same plaintext on open — the per-write-salt property. */
+            unsigned char *slot2 = malloc(vault_slot_len(VAULT_ANCHOR_CAPACITY));
+            if (slot2) {
+                ASSERT(vault_v2_seal(slot2, off, VAULT_ANCHOR_CAPACITY, &cfg, plain) == 1, "e2e: reseal");
+                ASSERT(memcmp(slot, slot2, vault_slot_len(VAULT_ANCHOR_CAPACITY)) != 0,
+                       "e2e: resealing the same directory yields different ciphertext");
+                free(slot2);
+            }
+
+            /* Wrong passphrase must fail to open. */
+            crypto_config_t bad = cfg;
+            bad.passphrase = "wrong-pass";
+            ASSERT(vault_v2_open(slot, off, VAULT_ANCHOR_CAPACITY, &bad, recovered) == 0,
+                   "e2e: wrong passphrase fails to open the anchor");
+        }
+        free(slot);
+        free(recovered);
+    }
+}
+
 int main(void) {
     printf("=== Qsafe 5.0 Unit Tests ===\n");
 
@@ -475,6 +843,9 @@ int main(void) {
     test_encrypt_decrypt_file();
     test_known_answer_vectors();
     test_v7_known_answer_vectors();
+    test_vault_known_answer_vectors();
+    test_vault_v2_known_answer_vectors();
+    test_vault_directory();
     test_error_codes();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);

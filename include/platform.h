@@ -73,6 +73,24 @@ static inline void qsafe_restore_meta(const char *path, unsigned mode, unsigned 
 #endif
 }
 
+/* 64-bit-offset seek/tell, since a hidden-volume container (src/vault.c) can
+ * exceed 2 GiB and plain fseek/ftell take a `long` (32 bits on Windows). */
+static inline int qsafe_fseek64(FILE *f, long long off, int whence) {
+#ifdef _WIN32
+    return _fseeki64(f, off, whence);
+#else
+    return fseeko(f, (off_t)off, whence);
+#endif
+}
+
+static inline long long qsafe_ftell64(FILE *f) {
+#ifdef _WIN32
+    return _ftelli64(f);
+#else
+    return (long long)ftello(f);
+#endif
+}
+
 /* Canonicalize `path` into `resolved` (which must hold at least PATH_MAX bytes).
  * Returns 1 on success, 0 on failure. */
 static inline int qsafe_realpath(const char *path, char *resolved) {

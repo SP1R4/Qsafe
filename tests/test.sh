@@ -660,6 +660,318 @@ case "$(uname -s)" in
     ;;
 esac
 
+# --- Test 22: vault (hidden volumes) ---
+echo ""
+echo "[test: vault init/write/read round-trip]"
+VC="$TMPDIR/vault_container.bin"
+check_ok "vault init succeeds" \
+    "$BINARY" vault init "$VC" --size 300000 --force
+check_ok "container has the declared size" \
+    sh -c "[ \"\$(wc -c < \"$VC\")\" -eq 300000 ]"
+check_fail "vault init without --force refuses to overwrite" \
+    "$BINARY" vault init "$VC" --size 1000
+
+echo "outer decoy payload for the integration test" > "$TMPDIR/vault_outer.in"
+echo "inner secret payload for the integration test" > "$TMPDIR/vault_inner.in"
+printf 'outer-pass-1' > "$TMPDIR/vault_outer.pass"
+printf 'inner-pass-2' > "$TMPDIR/vault_inner.pass"
+
+check_ok "vault write (outer slot) succeeds" \
+    "$BINARY" vault write "$VC" --offset 0 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_outer.pass" "$TMPDIR/vault_outer.in"
+check_ok "vault write (inner slot, non-overlapping) succeeds" \
+    "$BINARY" vault write "$VC" --offset 100000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_inner.pass" "$TMPDIR/vault_inner.in"
+
+check_ok "vault read (outer slot) succeeds" \
+    "$BINARY" vault read "$VC" --offset 0 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_outer.pass" "$TMPDIR/vault_outer.out"
+check_ok "outer round-trip matches" \
+    cmp -s "$TMPDIR/vault_outer.in" "$TMPDIR/vault_outer.out"
+check_ok "vault read (inner slot) succeeds" \
+    "$BINARY" vault read "$VC" --offset 100000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_inner.pass" "$TMPDIR/vault_inner.out"
+check_ok "inner round-trip matches" \
+    cmp -s "$TMPDIR/vault_inner.in" "$TMPDIR/vault_inner.out"
+
+echo ""
+echo "[test: vault deniability — indistinguishable failure modes]"
+rm -f "$TMPDIR/vault_wrongpass.out" "$TMPDIR/vault_empty.out"
+check_fail "wrong passphrase against the inner slot's coordinates is rejected" \
+    "$BINARY" vault read "$VC" --offset 100000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_outer.pass" "$TMPDIR/vault_wrongpass.out"
+[ ! -f "$TMPDIR/vault_wrongpass.out" ] \
+    && pass "wrong passphrase leaves no output file" || fail "wrong passphrase leaves no output file"
+
+check_fail "correct passphrase at an untouched region is rejected" \
+    "$BINARY" vault read "$VC" --offset 50000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_inner.pass" "$TMPDIR/vault_empty.out"
+[ ! -f "$TMPDIR/vault_empty.out" ] \
+    && pass "correct passphrase at an untouched region leaves no output file" \
+    || fail "correct passphrase at an untouched region leaves no output file"
+
+# The whole point of deniability: a wrong passphrase and a right passphrase
+# pointed at empty space must be byte-for-byte indistinguishable to the caller.
+"$BINARY" vault read "$VC" --offset 100000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_outer.pass" "$TMPDIR/vault_wrongpass2.out" \
+    2> "$TMPDIR/vault_wrongpass.err"
+"$BINARY" vault read "$VC" --offset 50000 --capacity 20000 \
+    --passphrase-file "$TMPDIR/vault_inner.pass" "$TMPDIR/vault_empty2.out" \
+    2> "$TMPDIR/vault_empty.err"
+rm -f "$TMPDIR/vault_wrongpass2.out" "$TMPDIR/vault_empty2.out"
+if diff -q "$TMPDIR/vault_wrongpass.err" "$TMPDIR/vault_empty.err" > /dev/null 2>&1; then
+    pass "wrong-passphrase and untouched-region errors are identical"
+else
+    fail "wrong-passphrase and untouched-region errors are identical"
+fi
+
+check_fail "vault write rejects input larger than the slot's capacity" \
+    "$BINARY" --force vault write "$VC" --offset 200000 --capacity 9 \
+    --passphrase-file "$TMPDIR/vault_outer.pass" "$TMPDIR/vault_outer.in"
+check_fail "vault write rejects stdin (capacity needs a known input length)" \
+    sh -c "echo x | \"$BINARY\" vault write \"$VC\" --offset 200000 --capacity 20000 --passphrase-file \"$TMPDIR/vault_outer.pass\" -"
+
+echo ""
+echo "[test: vault footprint]"
+FP=$("$BINARY" vault footprint --capacity 100000)
+[ "$FP" = "100032" ] && pass "vault footprint --capacity 100000 == 100032" \
+    || fail "vault footprint --capacity 100000 == 100032 (got $FP)"
+
+# --- Test 22b: frozen vault fixture ---
+# A container built once (--scrypt-cost 14, to keep CI fast) with two
+# non-overlapping slots at fixed coordinates. Must keep decrypting bit-for-bit
+# as vault.c evolves, the same guarantee the QSAFE007 fixtures give the main
+# format (§18 above).
+echo ""
+echo "[test: frozen vault fixture]"
+VFIX="$PROJECT_DIR/tests/fixtures/vault"
+if [ -f "$VFIX/container.bin" ]; then
+    cp "$VFIX/container.bin" "$TMPDIR/vfix_container.bin"
+    "$BINARY" vault read "$TMPDIR/vfix_container.bin" --offset 0 --capacity 140000 \
+        --scrypt-cost 14 --passphrase-file "$VFIX/decoy.pass" "$TMPDIR/vfix_decoy.out" >/dev/null 2>&1
+    check_ok "decrypts the frozen vault fixture's decoy slot" \
+        cmp -s "$VFIX/decoy.expected" "$TMPDIR/vfix_decoy.out"
+    "$BINARY" vault read "$TMPDIR/vfix_container.bin" --offset 200000 --capacity 90000 \
+        --scrypt-cost 14 --passphrase-file "$VFIX/hidden.pass" "$TMPDIR/vfix_hidden.out" >/dev/null 2>&1
+    check_ok "decrypts the frozen vault fixture's hidden slot" \
+        cmp -s "$VFIX/hidden.expected" "$TMPDIR/vfix_hidden.out"
+else
+    pass "frozen vault fixture skipped (not present)"
+fi
+
+# --- Test 22c: vault v2 volumes (anchor + directory + whole-container rewrite) ---
+# All at --scrypt-cost 14 to keep the anchor scrypt fast in CI.
+echo ""
+echo "[test: vault v2 volume create/add/ls/extract/rm]"
+V2C="$TMPDIR/v2vol.bin"
+printf 'v2-volume-A-pass' > "$TMPDIR/v2a.pass"
+printf 'v2-volume-B-pass' > "$TMPDIR/v2b.pass"
+printf 'wrong-v2-pass'    > "$TMPDIR/v2w.pass"
+echo "engagement loot payload for the v2 test" > "$TMPDIR/v2_loot.txt"
+
+check_ok "vault create makes a volume" \
+    "$BINARY" vault create "$V2C" --size 2000000 --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+"$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass" 2>/dev/null | grep -q "0 entries" \
+    && pass "a fresh volume lists no entries" || fail "a fresh volume lists no entries"
+check_fail "wrong passphrase cannot open the volume" \
+    "$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2w.pass"
+
+check_ok "vault add stores a named slot" \
+    "$BINARY" vault add "$V2C" "$TMPDIR/v2_loot.txt" --name loot --offset 500000 --capacity 100000 \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+"$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass" 2>/dev/null | grep -q "loot" \
+    && pass "ls shows the added slot" || fail "ls shows the added slot"
+check_ok "vault extract round-trips the slot" sh -c \
+    "\"$BINARY\" vault extract \"$V2C\" --name loot \"$TMPDIR/v2_loot.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/v2a.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/v2_loot.txt\" \"$TMPDIR/v2_loot.out\""
+check_fail "vault add rejects a slot overlapping an existing one" \
+    "$BINARY" vault add "$V2C" "$TMPDIR/v2_loot.txt" --name clash --offset 550000 --capacity 30000 \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+
+# Snapshot-diff invariant: a mutating write re-randomizes the WHOLE container,
+# so almost every byte differs (not just the touched slot).
+cp "$V2C" "$TMPDIR/v2_before.bin"
+echo "a second payload" > "$TMPDIR/v2_second.txt"
+"$BINARY" vault add "$V2C" "$TMPDIR/v2_second.txt" --name second --offset 900000 --capacity 40000 \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass" >/dev/null 2>&1
+DIFFPCT=$(python3 - "$TMPDIR/v2_before.bin" "$V2C" << 'PYEOF'
+import sys
+a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read()
+same=sum(1 for x,y in zip(a,b) if x==y)
+print(int(100*(len(a)-same)/len(a)))
+PYEOF
+)
+[ "${DIFFPCT:-0}" -ge 99 ] \
+    && pass "a mutating write re-randomizes the whole container (${DIFFPCT}% of bytes differ)" \
+    || fail "a mutating write re-randomizes the whole container (only ${DIFFPCT}% differ)"
+
+echo ""
+echo "[test: vault v2 multi-volume --keep semantics]"
+# Add a second volume B, preserving A via --keep.
+check_ok "vault create --keep adds a second volume, preserving the first" \
+    "$BINARY" vault create "$V2C" --keep "$TMPDIR/v2a.pass" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2b.pass"
+check_ok "volume A still opens after B is created with --keep" \
+    "$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+check_ok "volume B opens" \
+    "$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2b.pass"
+# A's data must survive B's creation.
+check_ok "volume A's slot survives the rewrite that created B" sh -c \
+    "\"$BINARY\" vault extract \"$V2C\" --name loot \"$TMPDIR/v2_keep.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/v2a.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/v2_loot.txt\" \"$TMPDIR/v2_keep.out\""
+# Writing to A WITHOUT --keep B destroys B (documented VeraCrypt-style behavior).
+echo "third payload" > "$TMPDIR/v2_third.txt"
+"$BINARY" vault add "$V2C" "$TMPDIR/v2_third.txt" --name third --offset 1300000 --capacity 40000 \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass" >/dev/null 2>&1
+check_ok "the write target (A) still opens" \
+    "$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+check_fail "a write omitting --keep destroys the un-kept volume B" \
+    "$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2b.pass"
+
+# rm drops one entry, preserving the rest.
+check_ok "vault rm removes a named slot" \
+    "$BINARY" vault rm "$V2C" --name third --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass"
+"$BINARY" vault ls "$V2C" --scrypt-cost 14 --passphrase-file "$TMPDIR/v2a.pass" 2>/dev/null | grep -q "third" \
+    && fail "rm removed the entry" || pass "rm removed the entry"
+check_ok "other slots survive rm" sh -c \
+    "\"$BINARY\" vault extract \"$V2C\" --name loot \"$TMPDIR/v2_rm.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/v2a.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/v2_loot.txt\" \"$TMPDIR/v2_rm.out\""
+
+# --- Test 22d: frozen v2 fixture ---
+# A checked-in two-volume container. v2 containers are NOT byte-reproducible
+# (each slot carries a fresh random nonce salt), so this fixture pins decrypt
+# *behavior* — both volumes must keep opening and yielding their slots — rather
+# than exact bytes. A format/derivation change that breaks compatibility trips
+# this.
+echo ""
+echo "[test: frozen v2 fixture]"
+V2FIX="$PROJECT_DIR/tests/fixtures/vault_v2"
+if [ -f "$V2FIX/container.bin" ]; then
+    cp "$V2FIX/container.bin" "$TMPDIR/v2fix.bin"
+    "$BINARY" vault extract "$TMPDIR/v2fix.bin" --name notes "$TMPDIR/v2fix_a.out" \
+        --scrypt-cost 14 --passphrase-file "$V2FIX/volA.pass" >/dev/null 2>&1
+    check_ok "frozen v2 fixture: volume A opens and yields its slot" \
+        cmp -s "$V2FIX/a_notes.expected" "$TMPDIR/v2fix_a.out"
+    "$BINARY" vault extract "$TMPDIR/v2fix.bin" --name keys "$TMPDIR/v2fix_b.out" \
+        --scrypt-cost 14 --passphrase-file "$V2FIX/volB.pass" >/dev/null 2>&1
+    check_ok "frozen v2 fixture: volume B opens and yields its slot" \
+        cmp -s "$V2FIX/b_keys.expected" "$TMPDIR/v2fix_b.out"
+    check_fail "frozen v2 fixture: volume A's passphrase does not open volume B's slot" \
+        "$BINARY" vault extract "$TMPDIR/v2fix.bin" --name keys "$TMPDIR/v2fix_x.out" \
+        --scrypt-cost 14 --passphrase-file "$V2FIX/volA.pass"
+else
+    pass "frozen v2 fixture skipped (not present)"
+fi
+
+# --- Test 22e: vault v2 keyfile (two-factor) ---
+# With a keyfile, the passphrase alone can neither locate the anchor nor open a
+# slot: both factors are required.
+echo ""
+echo "[test: vault v2 keyfile two-factor]"
+KFC="$TMPDIR/v2kf.bin"
+printf 'v2-keyfile-volume-pass' > "$TMPDIR/kf.pass"
+printf 'wrong-kf-volume-pass'   > "$TMPDIR/kf_wrong.pass"
+head -c 64 /dev/urandom > "$TMPDIR/kf_key.bin"
+head -c 64 /dev/urandom > "$TMPDIR/kf_wrong.bin"
+echo "two-factor protected loot" > "$TMPDIR/kf_loot.txt"
+
+check_ok "vault create --keyfile" \
+    "$BINARY" vault create "$KFC" --size 1500000 --scrypt-cost 14 \
+    --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
+check_ok "vault add --keyfile" \
+    "$BINARY" vault add "$KFC" "$TMPDIR/kf_loot.txt" --name loot --offset 400000 --capacity 80000 \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
+check_ok "correct passphrase + correct keyfile extracts" sh -c \
+    "\"$BINARY\" vault extract \"$KFC\" --name loot \"$TMPDIR/kf_loot.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/kf.pass\" --keyfile \"$TMPDIR/kf_key.bin\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/kf_loot.txt\" \"$TMPDIR/kf_loot.out\""
+check_fail "passphrase alone (no keyfile) cannot open a keyfile volume" \
+    "$BINARY" vault ls "$KFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass"
+check_fail "wrong keyfile cannot open" \
+    "$BINARY" vault ls "$KFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_wrong.bin"
+check_fail "keyfile alone (wrong passphrase) cannot open" \
+    "$BINARY" vault ls "$KFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/kf_wrong.pass" --keyfile "$TMPDIR/kf_key.bin"
+check_ok "both factors correct opens" \
+    "$BINARY" vault ls "$KFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
+
+# --- Test 22f: vault v2 passwd (change a volume's passphrase) ---
+echo ""
+echo "[test: vault v2 passwd]"
+PWC="$TMPDIR/v2pw.bin"
+printf 'passwd-old-secret' > "$TMPDIR/pw_old.pass"
+printf 'passwd-new-secret' > "$TMPDIR/pw_new.pass"
+echo "loot that must survive a passphrase change" > "$TMPDIR/pw_loot.txt"
+check_ok "passwd: create + add" sh -c \
+    "\"$BINARY\" vault create \"$PWC\" --size 3000000 --scrypt-cost 14 --passphrase-file \"$TMPDIR/pw_old.pass\" >/dev/null 2>&1 && \
+     \"$BINARY\" vault add \"$PWC\" \"$TMPDIR/pw_loot.txt\" --name loot --offset 500000 --capacity 80000 --scrypt-cost 14 --passphrase-file \"$TMPDIR/pw_old.pass\" >/dev/null 2>&1"
+check_ok "vault passwd changes the passphrase" \
+    "$BINARY" vault passwd "$PWC" --scrypt-cost 14 \
+    --passphrase-file "$TMPDIR/pw_old.pass" --new-passphrase-file "$TMPDIR/pw_new.pass"
+check_fail "old passphrase no longer opens the volume" \
+    "$BINARY" vault ls "$PWC" --scrypt-cost 14 --passphrase-file "$TMPDIR/pw_old.pass"
+check_ok "new passphrase opens the volume" \
+    "$BINARY" vault ls "$PWC" --scrypt-cost 14 --passphrase-file "$TMPDIR/pw_new.pass"
+check_ok "slot content survives the passphrase change" sh -c \
+    "\"$BINARY\" vault extract \"$PWC\" --name loot \"$TMPDIR/pw_loot.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/pw_new.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/pw_loot.txt\" \"$TMPDIR/pw_loot.out\""
+
+# --- Test 22g: vault v2 auto-placement (add without --offset/--capacity) ---
+echo ""
+echo "[test: vault v2 auto-placement]"
+APC="$TMPDIR/v2ap.bin"
+printf 'auto-place-pass' > "$TMPDIR/ap.pass"
+echo "alpha payload" > "$TMPDIR/ap_a.txt"
+echo "bravo payload, a little longer than alpha for variety" > "$TMPDIR/ap_b.txt"
+head -c 30000 /dev/urandom > "$TMPDIR/ap_c.bin"
+check_ok "auto-place: create" \
+    "$BINARY" vault create "$APC" --size 2000000 --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+check_ok "add with no --offset/--capacity (alpha)" \
+    "$BINARY" vault add "$APC" "$TMPDIR/ap_a.txt" --name alpha --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+check_ok "add with no --offset/--capacity (bravo)" \
+    "$BINARY" vault add "$APC" "$TMPDIR/ap_b.txt" --name bravo --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+check_ok "add with no --offset/--capacity (charlie, binary)" \
+    "$BINARY" vault add "$APC" "$TMPDIR/ap_c.bin" --name charlie --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+# All three auto-placed slots must round-trip (i.e. they did not overlap).
+check_ok "auto-placed alpha round-trips" sh -c \
+    "\"$BINARY\" vault extract \"$APC\" --name alpha \"$TMPDIR/ap_a.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/ap.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/ap_a.txt\" \"$TMPDIR/ap_a.out\""
+check_ok "auto-placed bravo round-trips" sh -c \
+    "\"$BINARY\" vault extract \"$APC\" --name bravo \"$TMPDIR/ap_b.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/ap.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/ap_b.txt\" \"$TMPDIR/ap_b.out\""
+check_ok "auto-placed charlie round-trips" sh -c \
+    "\"$BINARY\" vault extract \"$APC\" --name charlie \"$TMPDIR/ap_c.out\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/ap.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/ap_c.bin\" \"$TMPDIR/ap_c.out\""
+# Default capacity is an exact fit: content_len + 8. "alpha payload\n" is 14
+# bytes, so capacity = 22.
+"$BINARY" vault ls "$APC" --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass" 2>/dev/null | grep alpha | grep -q "capacity=22" \
+    && pass "auto capacity is an exact fit (14 + 8)" || fail "auto capacity is an exact fit (14 + 8)"
+# No-free-space is reported, not a crash.
+check_ok "auto-place: create small" \
+    "$BINARY" vault create "$TMPDIR/v2small.bin" --size 10000 --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+head -c 8000 /dev/urandom > "$TMPDIR/ap_big.bin"
+check_fail "auto-place rejects a slot with no room" \
+    "$BINARY" vault add "$TMPDIR/v2small.bin" "$TMPDIR/ap_big.bin" --name toobig \
+    --scrypt-cost 14 --passphrase-file "$TMPDIR/ap.pass"
+
+# --- Test 22h: vault v2 overflow directories (> 46 slots per volume) ---
+# Crossing the 46-slot boundary requires ~47 adds, each a whole-container
+# rewrite, so this is slow (~30-60s). It runs only when QSAFE_SLOW_TESTS=1; the
+# flag mechanism itself is covered fast by the C unit tests. Set the env var in
+# a scheduled/nightly job to exercise the full chain end to end.
+echo ""
+echo "[test: vault v2 overflow directories]"
+if [ "${QSAFE_SLOW_TESTS:-0}" = "1" ]; then
+    OFC="$TMPDIR/v2overflow.bin"
+    printf 'overflow-pass' > "$TMPDIR/of.pass"
+    printf 'DATA' > "$TMPDIR/of_d.txt"
+    "$BINARY" vault create "$OFC" --size 3000000 --scrypt-cost 14 --passphrase-file "$TMPDIR/of.pass" >/dev/null 2>&1
+    of_ok=1
+    for i in $(seq 1 48); do
+        "$BINARY" vault add "$OFC" "$TMPDIR/of_d.txt" --name "s$i" --scrypt-cost 14 \
+            --passphrase-file "$TMPDIR/of.pass" >/dev/null 2>&1 || { of_ok=0; break; }
+    done
+    [ "$of_ok" = 1 ] && pass "added 48 slots (past the 46-per-block boundary)" \
+        || fail "added 48 slots (past the 46-per-block boundary)"
+    N=$("$BINARY" vault ls "$OFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/of.pass" 2>/dev/null | grep -c "^  s")
+    [ "$N" = 48 ] && pass "all 48 slots listed across the directory chain" \
+        || fail "all 48 slots listed across the directory chain (got $N)"
+    # s48 lives in the overflow block (index >= 46).
+    check_ok "an overflow-block slot extracts correctly" sh -c \
+        "\"$BINARY\" vault extract \"$OFC\" --name s48 \"$TMPDIR/of_s48\" --scrypt-cost 14 --passphrase-file \"$TMPDIR/of.pass\" >/dev/null 2>&1 && [ \"\$(cat \"$TMPDIR/of_s48\")\" = DATA ]"
+else
+    pass "overflow-directory e2e skipped (set QSAFE_SLOW_TESTS=1 to run)"
+fi
+
 # --- Results ---
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed ==="

@@ -76,8 +76,12 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           make clean
-          make fuzz FUZZ_CC=clang
-          mkdir -p corpus
-          # 90 seconds is a smoke test, not a real campaign; long runs belong in
-          # a scheduled job or OSS-Fuzz.
+          make fuzz fuzz-vault fuzz-vault-dir FUZZ_CC=clang
+          mkdir -p corpus corpus_vault
+          # 90 seconds each is a smoke test, not a real campaign; long runs
+          # belong in a scheduled job or OSS-Fuzz.
           tests/fuzz_decrypt -max_len=8192 -max_total_time=90 -print_final_stats=1 corpus
+          cp tests/fixtures/vault/container.bin corpus_vault/ 2>/dev/null || true
+          tests/fuzz_vault -max_len=300000 -max_total_time=90 -print_final_stats=1 corpus_vault
+          mkdir -p corpus_vault_dir
+          tests/fuzz_vault_dir -max_len=4096 -max_total_time=90 -print_final_stats=1 corpus_vault_dir

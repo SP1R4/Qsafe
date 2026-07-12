@@ -153,6 +153,13 @@ typedef struct {
     const char *sign_pk_file;
     const char *signer_pk_file;
     int pad;                   /* encrypt: append Padmé size-hiding padding */
+
+    /* vault v2 optional keyfile (two-factor). When non-NULL, points at 32 bytes
+     * derived from a keyfile (SHA-256 with domain separation); it is mixed into
+     * both the anchor-location and the slot-key derivations, so the passphrase
+     * alone can neither find nor open a volume. NULL leaves every derivation
+     * byte-identical to the no-keyfile case. See docs/HIDDEN_VOLUMES_V2.md. */
+    const unsigned char *vault_keyfile_key;
 } crypto_config_t;
 
 void crypto_handle_errors(void);
@@ -177,6 +184,17 @@ crypto_error_t crypto_inspect_file(const char *filename, OQS_KEM *kem, const cry
 
 /* HKDF-SHA256: derive a 32-byte AES key from a high-entropy KEM shared secret. */
 crypto_error_t crypto_derive_aes_key(const unsigned char *shared_secret, size_t secret_len, unsigned char *aes_key);
+
+/* General HKDF-SHA256 with an explicit salt and (possibly binary) info string.
+ * Exposed for vault v2 (docs/HIDDEN_VOLUMES_V2.md), whose slot-key derivation
+ * needs a non-empty per-slot nonce salt and whose anchor derivation mixes the
+ * container size into info as raw bytes — neither of which the fixed-info,
+ * empty-salt internal derivations cover. Passing salt_len/info_len 0 omits
+ * that field (RFC 5869 defaults: all-zero salt, empty info). */
+crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
+                                  const unsigned char *salt, size_t salt_len,
+                                  const unsigned char *info, size_t info_len,
+                                  unsigned char *out, size_t out_len);
 
 /* scrypt: derive a 32-byte key-wrapping key from a user passphrase + random salt.
  * Unlike HKDF this is deliberately slow/memory-hard to resist passphrase guessing. */
@@ -239,5 +257,17 @@ crypto_error_t crypto_sign_file(const char *input_filename, const char *sig_file
  * Returns CRYPTO_SUCCESS only if the signature is valid. */
 crypto_error_t crypto_verify_signature(const char *input_filename, const char *sig_file,
                                        const char *sig_pk_file, const crypto_config_t *config);
+
+/* --- Framed-AEAD primitives (§2.3 of docs/FORMAT.md), exposed for reuse by
+ * modules that build their own container format on the same convention
+ * (src/vault.c's hidden-volume slots) instead of duplicating the OpenSSL
+ * boilerplate. --- */
+void crypto_frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]);
+int crypto_gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+                        const unsigned char *aad, size_t aadlen,
+                        const unsigned char *pt, int ptlen, unsigned char *ct, unsigned char tag[AES_GCM_TAG_SIZE]);
+int crypto_gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+                        const unsigned char *aad, size_t aadlen,
+                        const unsigned char *ct, int ctlen, const unsigned char tag[AES_GCM_TAG_SIZE], unsigned char *pt);
 
 #endif

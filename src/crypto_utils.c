@@ -144,6 +144,35 @@ crypto_error_t crypto_derive_aes_key(const unsigned char *shared_secret, size_t 
     return ret;
 }
 
+crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
+                                  const unsigned char *salt, size_t salt_len,
+                                  const unsigned char *info, size_t info_len,
+                                  unsigned char *out, size_t out_len) {
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    if (!kdf) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!kctx) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+
+    /* Up to: digest, key, salt, info, end. Salt/info are omitted when empty,
+     * so HKDF falls back to RFC 5869 defaults (all-zero salt, empty info) —
+     * matching the internal fixed-info derivations above. */
+    OSSL_PARAM params[5];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, "SHA256", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)ikm, ikm_len);
+    if (salt && salt_len > 0)
+        params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, salt_len);
+    if (info && info_len > 0)
+        params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, (void *)info, info_len);
+    params[i] = OSSL_PARAM_construct_end();
+
+    crypto_error_t ret = CRYPTO_SUCCESS;
+    if (EVP_KDF_derive(kctx, out, out_len, params) != 1) { crypto_handle_errors(); ret = CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX_free(kctx);
+    return ret;
+}
+
 crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const unsigned char *salt,
                                                  uint64_t n, uint32_t r, uint32_t p, unsigned char *out_key) {
     EVP_KDF *kdf = EVP_KDF_fetch(NULL, "SCRYPT", NULL);
@@ -758,8 +787,10 @@ static int gcm_open(const unsigned char key[AES_KEY_SIZE], const unsigned char n
  * big-endian counter, and a final byte that is 1 on the last frame else 0.
  * The content key is random per file, so this deterministic per-frame nonce is
  * unique under that key; the counter binds frame order and the final flag makes
- * truncation (a missing final frame) detectable. */
-static void frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]) {
+ * truncation (a missing final frame) detectable. Exposed (non-static) so other
+ * modules built on the same framed-AEAD convention (e.g. src/vault.c) don't
+ * reimplement it. */
+void crypto_frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]) {
     memset(nonce, 0, AES_GCM_NONCE_SIZE);
     for (int i = 0; i < 8; i++) {
         nonce[3 + i] = (unsigned char)((counter >> (8 * (7 - i))) & 0xff);
@@ -768,8 +799,9 @@ static void frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_
 }
 
 /* AES-256-GCM seal/open of one frame, with optional additional authenticated
- * data. ct must have room for ptlen bytes; tag is 16 bytes. */
-static int gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+ * data. ct must have room for ptlen bytes; tag is 16 bytes. Exposed for reuse
+ * (see crypto_frame_nonce above). */
+int crypto_gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
                         const unsigned char *aad, size_t aadlen,
                         const unsigned char *pt, int ptlen, unsigned char *ct, unsigned char tag[AES_GCM_TAG_SIZE]) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -787,7 +819,7 @@ static int gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned ch
     return ok;
 }
 
-static int gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+int crypto_gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
                         const unsigned char *aad, size_t aadlen,
                         const unsigned char *ct, int ctlen, const unsigned char tag[AES_GCM_TAG_SIZE], unsigned char *pt) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -1219,12 +1251,12 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
             }
 
             int last = (filled < QSAFE_FRAME_SIZE) ? 1 : 0;
-            frame_nonce(ctr, last, nonce);
+            crypto_frame_nonce(ctr, last, nonce);
             /* Bind the header into the first frame only; the counter+flag nonce
              * orders the rest and makes truncation detectable. */
             const unsigned char *aad = (ctr == 0) ? header : NULL;
             size_t aadlen = (ctr == 0) ? header_len : 0;
-            if (!gcm_seal_aad(cek, nonce, aad, aadlen, frame_pt, (int)filled, frame_ct, tag)) {
+            if (!crypto_gcm_seal_aad(cek, nonce, aad, aadlen, frame_pt, (int)filled, frame_ct, tag)) {
                 fprintf(stderr, "Error: AES-GCM frame encryption failed\n");
                 crypto_handle_errors();
                 goto cleanup;
@@ -1764,10 +1796,10 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
             }
             int last = (n < want) ? 1 : 0;
             size_t ptlen = n - AES_GCM_TAG_SIZE;
-            frame_nonce(ctr, last, nonce);
+            crypto_frame_nonce(ctr, last, nonce);
             const unsigned char *aad = (ctr == 0) ? header : NULL;
             size_t aadlen = (ctr == 0) ? header_len : 0;
-            if (!gcm_open_aad(cek, nonce, aad, aadlen, cbuf, (int)ptlen, cbuf + ptlen, pbuf)) {
+            if (!crypto_gcm_open_aad(cek, nonce, aad, aadlen, cbuf, (int)ptlen, cbuf + ptlen, pbuf)) {
                 fprintf(stderr, "Error: Authentication failed - file corrupt or wrong key\n");
                 ret = CRYPTO_ERR_INTEGRITY;
                 goto cleanup;

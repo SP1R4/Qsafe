@@ -85,6 +85,17 @@ _lib.qsafe_sign.argtypes = [_C, _C, _C, _C]
 _lib.qsafe_verify_signature.restype = _INT
 _lib.qsafe_verify_signature.argtypes = [_C, _C, _C]
 
+_U64 = ctypes.c_ulonglong
+_U = ctypes.c_uint
+_lib.qsafe_vault_create.restype = _INT
+_lib.qsafe_vault_create.argtypes = [_C, _C, _U64, _U]
+_lib.qsafe_vault_add.restype = _INT
+_lib.qsafe_vault_add.argtypes = [_C, _C, _C, _C, _U]
+_lib.qsafe_vault_extract.restype = _INT
+_lib.qsafe_vault_extract.argtypes = [_C, _C, _C, _C, _U]
+_lib.qsafe_vault_remove.restype = _INT
+_lib.qsafe_vault_remove.argtypes = [_C, _C, _C, _U]
+
 
 def _b(s):
     return s.encode() if isinstance(s, str) else s
@@ -129,6 +140,33 @@ def sign(in_path, sig_path, sign_secret_path, passphrase) -> None:
 def verify_signature(in_path, sig_path, sign_public_path) -> None:
     """Verify a detached signature; raises QsafeError if invalid."""
     _check(_lib.qsafe_verify_signature(_b(in_path), _b(sig_path), _b(sign_public_path)))
+
+
+# --- vault v2: deniable passphrase-addressed volumes (experimental) ---
+#
+# Thin wrappers over the single-volume, no-keyfile case; see
+# docs/HIDDEN_VOLUMES_V2.md. scrypt_log_n sets the KDF cost as log2(N) in
+# [14, 22]; 0 uses the vault default (higher, slower). Multi-volume --keep and
+# --keyfile are CLI-only for now.
+
+def vault_create(container_path, passphrase, size, scrypt_log_n=0) -> None:
+    """Create a container of `size` bytes with one empty volume (overwrites)."""
+    _check(_lib.qsafe_vault_create(_b(container_path), _b(passphrase), int(size), int(scrypt_log_n)))
+
+
+def vault_add(container_path, passphrase, name, in_path, scrypt_log_n=0) -> None:
+    """Add `in_path` as an auto-placed named slot in the volume."""
+    _check(_lib.qsafe_vault_add(_b(container_path), _b(passphrase), _b(name), _b(in_path), int(scrypt_log_n)))
+
+
+def vault_extract(container_path, passphrase, name, out_path, scrypt_log_n=0) -> None:
+    """Recover a named slot to `out_path`; raises QsafeError if absent/wrong passphrase."""
+    _check(_lib.qsafe_vault_extract(_b(container_path), _b(passphrase), _b(name), _b(out_path), int(scrypt_log_n)))
+
+
+def vault_remove(container_path, passphrase, name, scrypt_log_n=0) -> None:
+    """Remove a named slot from the volume."""
+    _check(_lib.qsafe_vault_remove(_b(container_path), _b(passphrase), _b(name), int(scrypt_log_n)))
 
 
 # --- byte-buffer convenience (staged through temp files) ---
