@@ -173,6 +173,33 @@ crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
     return ret;
 }
 
+crypto_error_t crypto_derive_key_argon2id(const char *passphrase, const unsigned char *salt,
+                                          uint32_t m_kib, uint32_t t_iters, uint32_t p_lanes,
+                                          unsigned char *out_key) {
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    if (!kdf) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!kctx) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+
+    /* threads only affects speed, not output; pin it to 1 for a deterministic,
+     * lane-count-defined result. Argon2 v1.3 (0x13) is OpenSSL's default. */
+    uint32_t threads = 1;
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)passphrase, strlen(passphrase)),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, KDF_SALT_SIZE),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &m_kib),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &t_iters),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &p_lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_end()
+    };
+    crypto_error_t ret = CRYPTO_SUCCESS;
+    if (EVP_KDF_derive(kctx, out_key, AES_KEY_SIZE, params) != 1) { crypto_handle_errors(); ret = CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX_free(kctx);
+    return ret;
+}
+
 crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const unsigned char *salt,
                                                  uint64_t n, uint32_t r, uint32_t p, unsigned char *out_key) {
     EVP_KDF *kdf = EVP_KDF_fetch(NULL, "SCRYPT", NULL);

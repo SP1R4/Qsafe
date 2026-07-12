@@ -100,6 +100,7 @@ static void print_usage(void) {
     printf("  --name <s>              vault add/extract/rm: slot name within a volume\n");
     printf("  --keep <ppfile>         vault create/add/rm: also preserve this volume (repeatable)\n");
     printf("  --keyfile <path>        vault v2: require this keyfile as a second factor\n");
+    printf("  --argon2                vault v2: derive keys with Argon2id (--scrypt-cost sets memory in KiB)\n");
     printf("  --new-passphrase-file <p> vault passwd: file holding the replacement passphrase\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
@@ -602,6 +603,7 @@ int main(int argc, char *argv[]) {
     config.signer_pk_file = NULL;
     config.pad = 0;
     config.vault_keyfile_key = NULL;
+    config.vault_kdf_argon2 = 0;
 
     const char *command = NULL;
     const char *cli_passphrase = NULL;
@@ -739,6 +741,8 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(a, "--new-passphrase-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --new-passphrase-file requires a path\n"); return 1; }
             vault_new_pp_file = argv[i];
+        } else if (strcmp(a, "--argon2") == 0) {
+            config.vault_kdf_argon2 = 1;
         } else if (strcmp(a, "--keep") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --keep requires a passphrase file\n"); return 1; }
             if (n_vault_keeps >= (int)(sizeof(vault_keeps) / sizeof(vault_keeps[0]))) {

@@ -89,6 +89,19 @@ static int vault_derive_salt(uint64_t offset, uint64_t capacity, unsigned char s
     return vault_sha256_16(ikm, ctxlen + sizeof(coords), salt16);
 }
 
+/* Passphrase -> 32-byte key via the volume's chosen memory-hard KDF: scrypt by
+ * default, or Argon2id when argon2 is set. In Argon2 mode `n` is reused as the
+ * memory cost (KiB) and r/p are ignored (time cost 3, 1 lane fixed). */
+static int vault_pw_key(const char *passphrase, const unsigned char *salt,
+                        uint64_t n, uint32_t r, uint32_t p, int argon2,
+                        unsigned char key_out[AES_KEY_SIZE]) {
+    if (argon2) {
+        uint32_t m_kib = (n > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)n;
+        return crypto_derive_key_argon2id(passphrase, salt, m_kib, 3, 1, key_out) == CRYPTO_SUCCESS;
+    }
+    return crypto_derive_key_from_passphrase(passphrase, salt, n, r, p, key_out) == CRYPTO_SUCCESS;
+}
+
 static int vault_slot_key(const crypto_config_t *config, uint64_t offset, uint64_t capacity,
                           unsigned char key_out[AES_KEY_SIZE]) {
     unsigned char salt[16];
@@ -96,7 +109,7 @@ static int vault_slot_key(const crypto_config_t *config, uint64_t offset, uint64
     uint64_t n = config->scrypt_n ? config->scrypt_n : (1ULL << VAULT_DEFAULT_LOG_N);
     uint32_t r = config->scrypt_n ? config->scrypt_r : SCRYPT_DEFAULT_R;
     uint32_t p = config->scrypt_n ? config->scrypt_p : SCRYPT_DEFAULT_P;
-    return crypto_derive_key_from_passphrase(config->passphrase, salt, n, r, p, key_out) == CRYPTO_SUCCESS;
+    return vault_pw_key(config->passphrase, salt, n, r, p, config->vault_kdf_argon2, key_out);
 }
 
 uint64_t vault_ciphertext_len(uint64_t capacity) {
@@ -146,7 +159,7 @@ int vault_v2_frame_key(const crypto_config_t *config, uint64_t offset, uint64_t 
  * tests can run cheaply; production opens pass n = 1 << VAULT_ANCHOR_LOG_N
  * (fixed, so the passphrase alone locates the anchor). */
 crypto_error_t vault_anchor_offset(const char *passphrase, uint64_t container_size,
-                                   uint64_t n, uint32_t r, uint32_t p,
+                                   uint64_t n, uint32_t r, uint32_t p, int argon2,
                                    const unsigned char *keyfile_key, uint64_t *offset_out) {
     uint64_t span = vault_slot_len(VAULT_ANCHOR_CAPACITY);
     if (container_size < span) return CRYPTO_ERR_INVALID_INPUT; /* too small to hold an anchor */
@@ -156,7 +169,7 @@ crypto_error_t vault_anchor_offset(const char *passphrase, uint64_t container_si
         return CRYPTO_ERR_CRYPTO;
 
     unsigned char anchor_ikm[AES_KEY_SIZE];
-    if (crypto_derive_key_from_passphrase(passphrase, loc_salt, n, r, p, anchor_ikm) != CRYPTO_SUCCESS)
+    if (!vault_pw_key(passphrase, loc_salt, n, r, p, argon2, anchor_ikm))
         return CRYPTO_ERR_CRYPTO;
 
     /* info = "qsafe-vault-anchor-v2" ‖ u64le(size) [‖ keyfile_key(32)], so a
@@ -672,13 +685,14 @@ static void vault_anchor_cost(const crypto_config_t *base, uint64_t *n, uint32_t
 /* Builds a config for deriving a slot/anchor key at cost n (r,p from base). */
 static void vault_cost_config(crypto_config_t *cfg, const char *passphrase,
                               uint64_t n, uint32_t r, uint32_t p,
-                              const unsigned char *keyfile_key) {
+                              const unsigned char *keyfile_key, int argon2) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->passphrase = passphrase;
     cfg->scrypt_n = n;
     cfg->scrypt_r = r;
     cfg->scrypt_p = p;
     cfg->vault_keyfile_key = keyfile_key; /* so the keyfile gates slot keys, not just the anchor location */
+    cfg->vault_kdf_argon2 = argon2;
 }
 
 static int vault_container_size(const char *path, uint64_t *size_out) {
@@ -708,7 +722,7 @@ static crypto_error_t vault_open_volume(FILE *f, uint64_t size, const char *pass
                                         const crypto_config_t *base, vault_dir_t *dir, uint64_t *a_off) {
     uint64_t an; uint32_t ar, ap;
     vault_anchor_cost(base, &an, &ar, &ap);
-    if (vault_anchor_offset(passphrase, size, an, ar, ap, base->vault_keyfile_key, a_off) != CRYPTO_SUCCESS)
+    if (vault_anchor_offset(passphrase, size, an, ar, ap, base->vault_kdf_argon2, base->vault_keyfile_key, a_off) != CRYPTO_SUCCESS)
         return CRYPTO_ERR_INTEGRITY;
 
     memset(dir, 0, sizeof(*dir));
@@ -719,7 +733,7 @@ static crypto_error_t vault_open_volume(FILE *f, uint64_t size, const char *pass
     unsigned char *blockbuf = malloc(VAULT_ANCHOR_CAPACITY);
     vault_dir_t *blk = malloc(sizeof(*blk));
     crypto_config_t acfg;
-    vault_cost_config(&acfg, passphrase, an, ar, ap, base->vault_keyfile_key);
+    vault_cost_config(&acfg, passphrase, an, ar, ap, base->vault_keyfile_key, base->vault_kdf_argon2);
     crypto_error_t ret = CRYPTO_ERR_INTEGRITY;
     if (!slot || !blockbuf || !blk) { ret = CRYPTO_ERR_MEMORY; goto done; }
 
@@ -885,7 +899,7 @@ static crypto_error_t vault_rewrite(const char *container, uint64_t size,
     for (int v = 0; v < nplans && ret == CRYPTO_SUCCESS; v++) {
         vault_plan_t *P = &plans[v];
         uint64_t a_off;
-        if (vault_anchor_offset(P->passphrase, size, an, ar, ap, base->vault_keyfile_key, &a_off) != CRYPTO_SUCCESS) {
+        if (vault_anchor_offset(P->passphrase, size, an, ar, ap, base->vault_kdf_argon2, base->vault_keyfile_key, &a_off) != CRYPTO_SUCCESS) {
             ret = CRYPTO_ERR_INVALID_INPUT; break;
         }
 
@@ -897,8 +911,8 @@ static crypto_error_t vault_rewrite(const char *container, uint64_t size,
              * the new passphrase; identical when read_passphrase is NULL. */
             crypto_config_t rcfg, wcfg;
             const char *rpass = P->read_passphrase ? P->read_passphrase : P->passphrase;
-            vault_cost_config(&rcfg, rpass, 1ULL << e->scrypt_log_n, ar, ap, base->vault_keyfile_key);
-            vault_cost_config(&wcfg, P->passphrase, 1ULL << e->scrypt_log_n, ar, ap, base->vault_keyfile_key);
+            vault_cost_config(&rcfg, rpass, 1ULL << e->scrypt_log_n, ar, ap, base->vault_keyfile_key, base->vault_kdf_argon2);
+            vault_cost_config(&wcfg, P->passphrase, 1ULL << e->scrypt_log_n, ar, ap, base->vault_keyfile_key, base->vault_kdf_argon2);
 
             unsigned char *blob = malloc(e->capacity);
             if (!blob) { ret = CRYPTO_ERR_MEMORY; break; }
@@ -934,7 +948,7 @@ static crypto_error_t vault_rewrite(const char *container, uint64_t size,
         int nblocks = vault_required_blocks(P->dir.entry_count);
         if (nblocks - 1 > P->dir.noverflow) { ret = CRYPTO_ERR_INVALID_INPUT; break; }
         crypto_config_t acfg;
-        vault_cost_config(&acfg, P->passphrase, an, ar, ap, base->vault_keyfile_key);
+        vault_cost_config(&acfg, P->passphrase, an, ar, ap, base->vault_keyfile_key, base->vault_kdf_argon2);
         uint8_t anchor_log = (uint8_t)__builtin_ctzll(an);
 
         for (int b = 0; b < nblocks && ret == CRYPTO_SUCCESS; b++) {
@@ -1135,7 +1149,7 @@ crypto_error_t vault_volume_extract(const char *container, const char *name,
         vault_cost_config(&scfg, config->passphrase, 1ULL << e->scrypt_log_n,
                           config->scrypt_r ? config->scrypt_r : SCRYPT_DEFAULT_R,
                           config->scrypt_p ? config->scrypt_p : SCRYPT_DEFAULT_P,
-                          config->vault_keyfile_key);
+                          config->vault_keyfile_key, config->vault_kdf_argon2);
         if (vault_v2_open(slot, e->offset, e->capacity, &scfg, blob)) {
             uint64_t content_len = load_u64le(blob);
             if (content_len <= e->capacity - 8) {

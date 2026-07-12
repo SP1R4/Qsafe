@@ -369,6 +369,26 @@ passphrase — it multiplies, not replaces.
 
 ---
 
+## 5b. Optional Argon2id KDF (`--argon2`)
+
+The passphrase is the *only* wall protecting a vault (there is no separate
+high-entropy secret key), so its KDF matters. The default is scrypt; `--argon2`
+switches to **Argon2id** (RFC 9106), the modern memory-hard PHC winner, which
+resists GPU/ASIC and time-memory-tradeoff attacks better than scrypt and (as
+the *id* variant) uses data-independent memory access. It is mixed into both
+the anchor-location and slot-key derivations, exactly like the scrypt path.
+
+Because the container has no header (deniability), the KDF choice — like the
+cost — is **remembered out of band**: a container written with `--argon2` opens
+only with `--argon2`, and a scrypt container only without it (each derives an
+unrelated anchor location and keys, so the wrong choice fails closed, the same
+generic "no data here"). `--scrypt-cost <c>` is reused as the Argon2 **memory
+cost** (`2^c` KiB — e.g. 16 → 64 MiB, 20 → 1 GiB); time cost 3 and a single
+lane are fixed. The no-`--argon2` scrypt path is byte-for-byte unchanged, so
+existing containers, fixtures, and KATs are unaffected.
+
+---
+
 ## 6. Threat-model deltas from v1
 
 Everything in [HIDDEN_VOLUMES.md](HIDDEN_VOLUMES.md) §6 still holds. Changes:

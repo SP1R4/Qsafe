@@ -888,6 +888,21 @@ check_fail "keyfile alone (wrong passphrase) cannot open" \
 check_ok "both factors correct opens" \
     "$BINARY" vault ls "$KFC" --scrypt-cost 14 --passphrase-file "$TMPDIR/kf.pass" --keyfile "$TMPDIR/kf_key.bin"
 
+# --- Test 22e2: vault v2 Argon2id KDF (opt-in) ---
+echo ""
+echo "[test: vault v2 Argon2id]"
+AGC="$TMPDIR/v2argon.bin"
+printf 'argon2-volume-pass' > "$TMPDIR/ag.pass"
+echo "loot protected by Argon2id" > "$TMPDIR/ag_loot.txt"
+check_ok "vault create --argon2" \
+    "$BINARY" vault create "$AGC" --size 1500000 --argon2 --scrypt-cost 14 --passphrase-file "$TMPDIR/ag.pass"
+check_ok "vault add --argon2" \
+    "$BINARY" vault add "$AGC" "$TMPDIR/ag_loot.txt" --name loot --argon2 --scrypt-cost 14 --passphrase-file "$TMPDIR/ag.pass"
+check_ok "argon2 round-trip" sh -c \
+    "\"$BINARY\" vault extract \"$AGC\" --name loot \"$TMPDIR/ag_loot.out\" --argon2 --scrypt-cost 14 --passphrase-file \"$TMPDIR/ag.pass\" >/dev/null 2>&1 && cmp -s \"$TMPDIR/ag_loot.txt\" \"$TMPDIR/ag_loot.out\""
+check_fail "scrypt mode cannot open an argon2 volume (KDF must be remembered)" \
+    "$BINARY" vault ls "$AGC" --scrypt-cost 14 --passphrase-file "$TMPDIR/ag.pass"
+
 # --- Test 22f: vault v2 passwd (change a volume's passphrase) ---
 echo ""
 echo "[test: vault v2 passwd]"

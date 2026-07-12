@@ -50,6 +50,7 @@ _qsafe() {
         '*--keep[vault: also preserve this volume]:passphrase file:_files' \
         '--keyfile[vault v2: second-factor keyfile]:file:_files' \
         '--new-passphrase-file[vault passwd: new passphrase file]:file:_files' \
+        '--argon2[vault v2: use Argon2id instead of scrypt]' \
         '--verbose[Verbose output]' \
         '--force[Overwrite without prompting]' \
         '--help[Show usage]' \

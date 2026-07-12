@@ -15,7 +15,7 @@ keys split-key join-key vault age-keygen age-encrypt age-decrypt help version"
     local options="--key-file --pub-file --recipient -r --identity --identity-file -i \
 --passphrase --passphrase-file --check --armor --sign-with --signer --pad \
 --threshold --shares --scrypt-cost --keychain --verbose --force --help --version \
---size --offset --capacity --name --keep --keyfile --new-passphrase-file"
+--size --offset --capacity --name --keep --keyfile --new-passphrase-file --argon2"
 
     # Options that take a file/path argument.
     case "$prev" in

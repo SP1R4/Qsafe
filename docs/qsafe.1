@@ -200,6 +200,12 @@ For vault v2: require this file as a second factor. Its hash is mixed into both
 the anchor location and the slot keys, so the passphrase alone can neither find
 nor open a volume.
 .TP
+.B \-\-argon2
+For vault v2: derive passphrase keys with Argon2id (RFC 9106) instead of scrypt.
+\fB\-\-scrypt\-cost\fR is reused as the Argon2 memory cost (2^c KiB). The choice
+is remembered out of band \(em an Argon2 container opens only with
+\fB\-\-argon2\fR. Requires OpenSSL 3.2+.
+.TP
 .BI \-\-new\-passphrase\-file " path"
 For vault passwd: file holding the replacement passphrase.
 .TP

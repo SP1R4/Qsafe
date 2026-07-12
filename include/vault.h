@@ -77,7 +77,7 @@ int vault_v2_frame_key(const crypto_config_t *config, uint64_t offset, uint64_t 
  * for the optional two-factor keyfile — NULL reproduces the no-keyfile offset.
  * Fails (CRYPTO_ERR_INVALID_INPUT) if the container is too small for an anchor. */
 crypto_error_t vault_anchor_offset(const char *passphrase, uint64_t container_size,
-                                   uint64_t n, uint32_t r, uint32_t p,
+                                   uint64_t n, uint32_t r, uint32_t p, int argon2,
                                    const unsigned char *keyfile_key, uint64_t *offset_out);
 
 /* Derives a 32-byte keyfile key from a file: SHA-256("qsafe-vault-keyfile-v1"

@@ -160,6 +160,11 @@ typedef struct {
      * alone can neither find nor open a volume. NULL leaves every derivation
      * byte-identical to the no-keyfile case. See docs/HIDDEN_VOLUMES_V2.md. */
     const unsigned char *vault_keyfile_key;
+
+    /* vault v2: when nonzero, derive passphrase keys with Argon2id instead of
+     * scrypt (opt-in, remembered out-of-band like the cost). scrypt_n is reused
+     * as the Argon2 memory cost in KiB; time cost 3 and 1 lane are fixed. */
+    int vault_kdf_argon2;
 } crypto_config_t;
 
 void crypto_handle_errors(void);
@@ -200,6 +205,13 @@ crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
  * Unlike HKDF this is deliberately slow/memory-hard to resist passphrase guessing. */
 crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const unsigned char *salt,
                                                  uint64_t n, uint32_t r, uint32_t p, unsigned char *out_key);
+
+/* Argon2id (RFC 9106) — the modern memory-hard passphrase KDF, an alternative
+ * to scrypt for vault (opt-in). m_kib is memory in KiB, t_iters the time cost,
+ * p_lanes the parallelism. Salt is KDF_SALT_SIZE bytes; output AES_KEY_SIZE. */
+crypto_error_t crypto_derive_key_argon2id(const char *passphrase, const unsigned char *salt,
+                                          uint32_t m_kib, uint32_t t_iters, uint32_t p_lanes,
+                                          unsigned char *out_key);
 
 crypto_error_t crypto_save_secret_key(const char *filename, const unsigned char *secret_key, size_t length, const crypto_config_t *config);
 unsigned char *crypto_load_secret_key(const char *filename, size_t *length, const crypto_config_t *config);

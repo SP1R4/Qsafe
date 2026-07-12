@@ -390,6 +390,22 @@ static void test_known_answer_vectors(void) {
     to_hex(sckey, sizeof(sckey), hex);
     ASSERT(strcmp(hex, "3eeeb21df68c7b1087858f538b51ef7b17ae239aad10e867ef959116c3fcf8d9") == 0,
            "scrypt derived key matches known answer");
+
+    /* (3b) Argon2id (crypto_derive_key_argon2id), pass="argon2-vault-kat",
+     *      salt = 16 bytes of 0x11, m=16 KiB, t=3, lanes=1 -> fixed 32-byte
+     *      key. Pinned against the independent `openssl kdf ... ARGON2ID` CLI,
+     *      confirming the EVP parameter wiring matches OpenSSL's RFC 9106
+     *      implementation. */
+    {
+        unsigned char asalt[KDF_SALT_SIZE];
+        memset(asalt, 0x11, sizeof(asalt));
+        unsigned char akey[AES_KEY_SIZE];
+        ASSERT(crypto_derive_key_argon2id("argon2-vault-kat", asalt, 16, 3, 1, akey) == CRYPTO_SUCCESS,
+               "Argon2id KAT computes");
+        to_hex(akey, sizeof(akey), hex);
+        ASSERT(strcmp(hex, "bb320c05702aa2f97f11f2d0bd15f590d5374e2fff2a9523dc8d5abb18167d20") == 0,
+               "Argon2id derived key matches the openssl kdf CLI");
+    }
 }
 
 /* Known-answer vectors for the v7 construction (docs/FORMAT.md §10). The
@@ -652,7 +668,7 @@ static void test_vault_v2_known_answer_vectors(void) {
      *     mixing in the container size, and the modular reduction). */
     {
         uint64_t off = 0;
-        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 10000000, 1ULL << 14, 8, 1, NULL, &off) == CRYPTO_SUCCESS,
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 10000000, 1ULL << 14, 8, 1, 0, NULL, &off) == CRYPTO_SUCCESS,
                "vault_anchor_offset computes");
         ASSERT(off == 5631317, "anchor offset matches known answer (Lemire multiply-shift reduction)");
         ASSERT(off + vault_slot_len(VAULT_ANCHOR_CAPACITY) <= 10000000,
@@ -661,11 +677,11 @@ static void test_vault_v2_known_answer_vectors(void) {
         /* A different container size relocates the anchor (size is mixed into
          * the derivation), and a container too small to hold an anchor fails. */
         uint64_t off2 = 0;
-        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 20000000, 1ULL << 14, 8, 1, NULL, &off2) == CRYPTO_SUCCESS &&
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 20000000, 1ULL << 14, 8, 1, 0, NULL, &off2) == CRYPTO_SUCCESS &&
                off2 != 1389354,
                "a different container size relocates the anchor");
         uint64_t off3 = 0;
-        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 1000, 1ULL << 14, 8, 1, NULL, &off3) == CRYPTO_ERR_INVALID_INPUT,
+        ASSERT(vault_anchor_offset("vault-anchor-kat-pass", 1000, 1ULL << 14, 8, 1, 0, NULL, &off3) == CRYPTO_ERR_INVALID_INPUT,
                "a container too small for an anchor is rejected");
     }
 }

@@ -57,6 +57,14 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flag-marked pointer to a chained overflow block. No format-version bump — a
   volume of ≤ 46 slots serializes byte-identically to before, so existing
   containers, the frozen fixture, and the directory KAT are unaffected.
+- **Vault v2 Argon2id KDF** (`--argon2`): opt-in, derives passphrase keys with
+  Argon2id (RFC 9106) instead of scrypt — memory-hard, GPU/ASIC-resistant, and
+  data-independent (the *id* variant). Mixed into both the anchor location and
+  slot keys; `--scrypt-cost` is reused as the Argon2 memory cost (2^c KiB). The
+  KDF choice is remembered out-of-band (headerless container); the scrypt path
+  is byte-identical, so existing containers/fixtures/KATs are unaffected. Adds
+  an exported `crypto_derive_key_argon2id`, KAT-pinned against the `openssl kdf`
+  CLI. Requires OpenSSL 3.2+.
 - **Man page + shell completions** now cover every `vault` subcommand and option.
 
 ### Assurance

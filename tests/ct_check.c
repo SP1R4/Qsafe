@@ -78,6 +78,23 @@ int main(void) {
         fprintf(stderr, "ct_check: scrypt path exercised\n");
     }
 
+    /* 1b) Argon2id: the passphrase is the secret. Argon2id is designed to be
+     * data-independent in its memory access (unlike Argon2d), so it should not
+     * branch/index on the poisoned passphrase. */
+    {
+        char pass[32] = "correct horse battery staple...";
+        unsigned char salt[KDF_SALT_SIZE];
+        unsigned char key[AES_KEY_SIZE];
+        memset(salt, 0x24, sizeof(salt));
+        VALGRIND_MAKE_MEM_UNDEFINED(pass, strlen(pass));
+        if (crypto_derive_key_argon2id(pass, salt, 16, 3, 1, key) != CRYPTO_SUCCESS) {
+            fprintf(stderr, "ct_check: argon2id failed\n");
+            return 2;
+        }
+        VALGRIND_MAKE_MEM_DEFINED(key, sizeof(key));
+        fprintf(stderr, "ct_check: Argon2id path exercised\n");
+    }
+
     /* 2) HKDF: the input keying material (DH ‖ KEM shared secret) is secret. */
     {
         unsigned char ikm[64];
