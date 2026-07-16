@@ -210,6 +210,13 @@ crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
                                   const unsigned char *info, size_t info_len,
                                   unsigned char *out, size_t out_len);
 
+/* HMAC-SHA256: 32-byte tag over `data` under `key`. Used by PQXDH to bind the
+ * opening message under the derived session secret (deniable authentication —
+ * the tag is verifiable by anyone who knows SK, hence non-transferable). */
+crypto_error_t crypto_hmac_sha256(const unsigned char *key, size_t key_len,
+                                  const unsigned char *data, size_t data_len,
+                                  unsigned char out[32]);
+
 /* scrypt: derive a 32-byte key-wrapping key from a user passphrase + random salt.
  * Unlike HKDF this is deliberately slow/memory-hard to resist passphrase guessing. */
 crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const unsigned char *salt,

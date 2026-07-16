@@ -86,7 +86,7 @@ int main(void) {
         pqxdh_bundle_t bundle; pqxdh_publish_bundle(&B, &bundle); attach_opk(&B, &bundle, 2);
         pqxdh_initial_t msg; ratchet_session_t *pa = NULL, *pb = NULL;
         CHECK(pqxdh_initiator(&A, &bundle, 1, &msg, &pa) == CRYPTO_SUCCESS, "PQ initiator");
-        CHECK(msg.pq == 1, "opening message carries the (signed) pq flag");
+        CHECK(msg.pq == 1, "opening message carries the (MAC'd) pq flag");
         CHECK(pqxdh_responder(&B, &msg, &pb) == CRYPTO_SUCCESS, "PQ responder");
         CHECK(pa && pb && ratchet_hdr_size(pa) == RATCHET_PQ_HDR_SIZE &&
               ratchet_hdr_size(pb) == RATCHET_PQ_HDR_SIZE, "both sessions are PQ");
@@ -118,16 +118,66 @@ int main(void) {
         ratchet_session_free(s);
     }
 
-    /* 4. Tampered opening message -> responder rejects. */
+    /* 4. Tampered opening message -> responder rejects (the SK-keyed MAC covers it). */
     {
         pqxdh_bundle_t bundle; pqxdh_publish_bundle(&B, &bundle);
         pqxdh_initial_t msg; ratchet_session_t *s = NULL;
         CHECK(pqxdh_initiator(&A, &bundle, 0, &msg, &s) == CRYPTO_SUCCESS, "clean handshake for tamper test");
         ratchet_session_free(s);
-        msg.ek_pk[0] ^= 0x01;   /* flip a byte the signature covers */
+        msg.ek_pk[0] ^= 0x01;   /* flip a byte the MAC covers */
         ratchet_session_t *bs2 = NULL;
         CHECK(pqxdh_responder(&B, &msg, &bs2) == CRYPTO_ERR_INTEGRITY, "tampered opening message rejected");
         ratchet_session_free(bs2);
+    }
+
+    /* 5. Downgrade attack: flip the pq intent 1->0 in transit. The MAC keyed from
+     * SK covers pq, so the responder rejects rather than silently dropping to the
+     * classical ratchet. */
+    {
+        pqxdh_bundle_t bundle; pqxdh_publish_bundle(&B, &bundle);
+        pqxdh_initial_t msg; ratchet_session_t *s = NULL;
+        CHECK(pqxdh_initiator(&A, &bundle, 1, &msg, &s) == CRYPTO_SUCCESS, "clean PQ handshake for downgrade test");
+        ratchet_session_free(s);
+        msg.pq = 0;             /* relay tries to strip PQ */
+        ratchet_session_t *bs2 = NULL;
+        CHECK(pqxdh_responder(&B, &msg, &bs2) == CRYPTO_ERR_INTEGRITY, "pq downgrade rejected");
+        ratchet_session_free(bs2);
+    }
+
+    /* 6. Impersonation: an attacker M builds a valid opening to B, then relabels it
+     * with A's signing key to pose as A. M's ik_dh self-cert does not verify under
+     * A's ik_sig, so B rejects before ever using the substituted DH key (this is the
+     * bind that replaced the old per-opening identity signature). Deniability note:
+     * the cert M *could* present for its own ik_dh is static and conversation-
+     * independent, so honest use leaks no transferable proof of contact. */
+    {
+        pqxdh_identity_t M;
+        CHECK(pqxdh_identity_generate(&M) == CRYPTO_SUCCESS, "generate attacker M");
+        pqxdh_bundle_t bundle; pqxdh_publish_bundle(&B, &bundle);
+        pqxdh_initial_t msg; ratchet_session_t *s = NULL;
+        CHECK(pqxdh_initiator(&M, &bundle, 0, &msg, &s) == CRYPTO_SUCCESS, "M builds its own opening");
+        ratchet_session_free(s);
+        memcpy(msg.ik_sig_pk, A.ik_sig_pk, QSAFE_SIG_PUB_SIZE);  /* claim to be A */
+        ratchet_session_t *bs2 = NULL;
+        CHECK(pqxdh_responder(&B, &msg, &bs2) == CRYPTO_ERR_INTEGRITY, "impersonation via ik_dh substitution rejected");
+        ratchet_session_free(bs2);
+        pqxdh_identity_free(&M);
+    }
+
+    /* 7. Bundle ik_dh_cert must bind ik_dh to ik_sig: forge the cert, and swap in a
+     * foreign ik_dh under B's real cert. Both -> initiator rejects. */
+    {
+        pqxdh_bundle_t bundle; pqxdh_publish_bundle(&B, &bundle);
+        bundle.ik_dh_cert[0] ^= 0x01;
+        pqxdh_initial_t msg; ratchet_session_t *s = NULL;
+        CHECK(pqxdh_initiator(&A, &bundle, 0, &msg, &s) == CRYPTO_ERR_INTEGRITY, "forged ik_dh cert rejected");
+        ratchet_session_free(s);
+
+        pqxdh_bundle_t b2; pqxdh_publish_bundle(&B, &b2);
+        memcpy(b2.ik_dh_pk, A.ik_dh_pk, X25519_KEY_SIZE);  /* foreign DH key under B's cert */
+        ratchet_session_t *s2 = NULL;
+        CHECK(pqxdh_initiator(&A, &b2, 0, &msg, &s2) == CRYPTO_ERR_INTEGRITY, "substituted ik_dh in bundle rejected");
+        ratchet_session_free(s2);
     }
 
     pqxdh_identity_free(&A);

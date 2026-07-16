@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
@@ -171,6 +172,16 @@ crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
     if (EVP_KDF_derive(kctx, out, out_len, params) != 1) { crypto_handle_errors(); ret = CRYPTO_ERR_CRYPTO; }
     EVP_KDF_CTX_free(kctx);
     return ret;
+}
+
+crypto_error_t crypto_hmac_sha256(const unsigned char *key, size_t key_len,
+                                  const unsigned char *data, size_t data_len,
+                                  unsigned char out[32]) {
+    if (!key || !data || !out) return CRYPTO_ERR_INVALID_INPUT;
+    unsigned int mac_len = 0;
+    unsigned char *r = HMAC(EVP_sha256(), key, (int)key_len, data, data_len, out, &mac_len);
+    if (!r || mac_len != 32) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    return CRYPTO_SUCCESS;
 }
 
 crypto_error_t crypto_derive_key_argon2id(const char *passphrase, const unsigned char *salt,

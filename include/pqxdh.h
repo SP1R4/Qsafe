@@ -24,10 +24,12 @@
 #define PQXDH_MLKEM_SEC 3168
 #define PQXDH_MLKEM_CT  1568
 
-#define PQXDH_LABEL_SK  "Veil-PQXDH-v1"   /* final HKDF info */
-#define PQXDH_LABEL_SPK "Veil-SPK-v1"     /* signed-prekey signature context */
-#define PQXDH_LABEL_PQK "Veil-PQK-v1"     /* KEM-prekey signature context */
-#define PQXDH_LABEL_OPK "Veil-OPK-v1"     /* one-time-prekey signature context */
+#define PQXDH_LABEL_SK   "Veil-PQXDH-v1"    /* final HKDF info */
+#define PQXDH_LABEL_SPK  "Veil-SPK-v1"      /* signed-prekey signature context */
+#define PQXDH_LABEL_PQK  "Veil-PQK-v1"      /* KEM-prekey signature context */
+#define PQXDH_LABEL_OPK  "Veil-OPK-v1"      /* one-time-prekey signature context */
+#define PQXDH_LABEL_IDDH "Veil-IDDH-v1"     /* identity DH self-cert context */
+#define PQXDH_LABEL_OMAC "Veil-OpenMAC-v1"  /* opening-message MAC key (from SK) */
 
 /* One-time prekeys generated per identity. Each is used at most once (the relay
  * hands out a distinct one per fetch; the receiver tracks consumption), which is
@@ -44,6 +46,10 @@ typedef struct {
     unsigned char ik_dh_pk[X25519_KEY_SIZE], ik_dh_sk[X25519_KEY_SIZE];
     unsigned char spk_pk[X25519_KEY_SIZE],   spk_sk[X25519_KEY_SIZE];
     unsigned char pqk_pk[PQXDH_MLKEM_PUB],   pqk_sk[PQXDH_MLKEM_SEC];
+    /* Static self-certificate binding ik_dh to ik_sig: Sign_ik_sig(LABEL_IDDH ||
+     * ik_dh_pk). Conversation-independent, so it carries no deniability cost, yet
+     * lets a peer confirm the identity DH key belongs to the pinned signing key. */
+    unsigned char ik_dh_cert[QSAFE_SIG_MAX_SIZE]; size_t ik_dh_cert_len;
     uint32_t      opk_id[PQXDH_OPK_POOL];
     unsigned char opk_pk[PQXDH_OPK_POOL][X25519_KEY_SIZE];
     unsigned char opk_sk[PQXDH_OPK_POOL][X25519_KEY_SIZE];
@@ -56,6 +62,7 @@ typedef struct {
 typedef struct {
     unsigned char ik_sig_pk[QSAFE_SIG_PUB_SIZE];
     unsigned char ik_dh_pk[X25519_KEY_SIZE];
+    unsigned char ik_dh_cert[QSAFE_SIG_MAX_SIZE]; size_t ik_dh_cert_len;  /* binds ik_dh to ik_sig */
     unsigned char spk_pk[X25519_KEY_SIZE];
     unsigned char spk_sig[QSAFE_SIG_MAX_SIZE]; size_t spk_sig_len;
     unsigned char pqk_pk[PQXDH_MLKEM_PUB];
@@ -67,16 +74,26 @@ typedef struct {
 } pqxdh_bundle_t;
 
 /* The initiator's opening message. `opk_id` names the one-time prekey used, or is
- * -1 when the peer's pool was empty. `sig` is an ML-DSA-87 signature by ik_sig
- * over the other fields (SPEC §2.5). */
+ * -1 when the peer's pool was empty (SPEC §2.5).
+ *
+ * Deniable authentication: the opening is NOT signed by the initiator's identity
+ * key (that would be transferable non-repudiation — a third party could prove the
+ * initiator opened this conversation). Instead:
+ *   - ik_dh_cert is the initiator's *static* self-cert (Sign_ik_sig(ik_dh_pk));
+ *     conversation-independent, so it proves key ownership without proving contact.
+ *   - mac = HMAC(SK-derived key, opening bytes) authenticates ek_pk / pq_ct /
+ *     opk_id / pq under the shared secret. The responder — who also derives SK —
+ *     can verify it but could equally have forged it, so it is non-transferable.
+ *     Covering `pq` this way still prevents a relay from downgrading the ratchet. */
 typedef struct {
     unsigned char ik_sig_pk[QSAFE_SIG_PUB_SIZE];
     unsigned char ik_dh_pk[X25519_KEY_SIZE];
+    unsigned char ik_dh_cert[QSAFE_SIG_MAX_SIZE]; size_t ik_dh_cert_len;
     unsigned char ek_pk[X25519_KEY_SIZE];
     unsigned char pq_ct[PQXDH_MLKEM_CT];
     int64_t       opk_id;   /* >=0 = OPK id used; -1 = none */
-    int           pq;       /* 1 = use the continuous PQ ratchet; signed, so a MITM can't downgrade */
-    unsigned char sig[QSAFE_SIG_MAX_SIZE]; size_t sig_len;
+    int           pq;       /* 1 = use the continuous PQ ratchet; MAC'd, so a MITM can't downgrade */
+    unsigned char mac[32];  /* HMAC-SHA256 over the opening, keyed from SK */
 } pqxdh_initial_t;
 
 /* Generate a fresh identity + prekeys and self-sign the signed/KEM prekeys. */

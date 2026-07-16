@@ -1,8 +1,12 @@
 /* PQXDH handshake — see include/pqxdh.h and veil/docs/SPEC.md §2.
  *
  * Clean PQXDH: four X25519 legs + one independent ML-KEM-1024 leg, concatenated
- * once into HKDF-SHA256 to produce the ratchet's seed secret SK. Prekeys and the
- * opening message are ML-DSA-87 signed; verification is fail-closed. */
+ * once into HKDF-SHA256 to produce the ratchet's seed secret SK. Prekeys carry
+ * ML-DSA-87 signatures (fail-closed verification). The initiator's opening message
+ * is authenticated *deniably* — a static ik_dh self-cert binds its DH key to the
+ * pinned signing key, and an HMAC keyed from SK authenticates the per-handshake
+ * fields (see the pqxdh_initial_t comment in pqxdh.h). It is NOT signed, so it
+ * yields no transferable proof that the initiator opened the conversation. */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,9 +53,10 @@ static crypto_error_t verify_labeled(const char *label,
     return rc;
 }
 
-/* Canonical bytes of the opening message that IK_sig_A signs (SPEC §2.5):
- * ik_sig_pk | ik_dh_pk | ek_pk | pq_ct | used_opk(1). */
-static size_t initial_signed_bytes(const pqxdh_initial_t *m, unsigned char *buf) {
+/* Canonical bytes of the opening message covered by the SK-keyed MAC (SPEC §2.5):
+ * ik_sig_pk | ik_dh_pk | ek_pk | pq_ct | used_opk(8) | pq(1). Both identities are
+ * bound in so the MAC also pins who the handshake is between. */
+static size_t opening_mac_bytes(const pqxdh_initial_t *m, unsigned char *buf) {
     unsigned char *p = buf;
     memcpy(p, m->ik_sig_pk, QSAFE_SIG_PUB_SIZE); p += QSAFE_SIG_PUB_SIZE;
     memcpy(p, m->ik_dh_pk, X25519_KEY_SIZE);     p += X25519_KEY_SIZE;
@@ -59,10 +64,19 @@ static size_t initial_signed_bytes(const pqxdh_initial_t *m, unsigned char *buf)
     memcpy(p, m->pq_ct, PQXDH_MLKEM_CT);         p += PQXDH_MLKEM_CT;
     uint64_t v = (uint64_t)m->opk_id;
     for (int i = 7; i >= 0; i--) *p++ = (unsigned char)(v >> (8 * i));
-    *p++ = (unsigned char)(m->pq ? 1 : 0);       /* PQ-ratchet intent, signed (no downgrade) */
+    *p++ = (unsigned char)(m->pq ? 1 : 0);       /* PQ-ratchet intent, MAC'd (no downgrade) */
     return (size_t)(p - buf);
 }
-#define INITIAL_SIGNED_LEN (QSAFE_SIG_PUB_SIZE + 2*X25519_KEY_SIZE + PQXDH_MLKEM_CT + 8 + 1)
+#define OPENING_MAC_LEN (QSAFE_SIG_PUB_SIZE + 2*X25519_KEY_SIZE + PQXDH_MLKEM_CT + 8 + 1)
+
+/* Derive the opening-MAC key from the session secret SK (domain-separated from
+ * the ratchet's own use of SK by the LABEL_OMAC HKDF info). */
+static crypto_error_t derive_open_mac_key(const unsigned char sk[AES_KEY_SIZE],
+                                          unsigned char mac_key[AES_KEY_SIZE]) {
+    return crypto_hkdf_sha256(sk, AES_KEY_SIZE, NULL, 0,
+                              (const unsigned char *)PQXDH_LABEL_OMAC, strlen(PQXDH_LABEL_OMAC),
+                              mac_key, AES_KEY_SIZE);
+}
 
 /* Canonical signed bytes of one OPK entry: LABEL is applied by sign/verify_labeled;
  * here we build (u32 opk_id || opk_pk). */
@@ -88,6 +102,10 @@ crypto_error_t pqxdh_identity_generate(pqxdh_identity_t *id) {
     crypto_error_t rc;
     if ((rc = crypto_sig_keypair_raw(id->ik_sig_pk, id->ik_sig_sk)) != CRYPTO_SUCCESS) return rc;
     if ((rc = crypto_x25519_keypair(id->ik_dh_sk, id->ik_dh_pk)) != CRYPTO_SUCCESS) return rc;
+    /* Static self-cert binding the identity DH key to the signing key (deniable:
+     * conversation-independent). Verified by peers instead of a per-handshake sig. */
+    if ((rc = sign_labeled(PQXDH_LABEL_IDDH, id->ik_dh_pk, X25519_KEY_SIZE,
+                           id->ik_sig_sk, id->ik_dh_cert, &id->ik_dh_cert_len)) != CRYPTO_SUCCESS) return rc;
     if ((rc = crypto_x25519_keypair(id->spk_sk, id->spk_pk)) != CRYPTO_SUCCESS) return rc;
     for (uint32_t i = 0; i < PQXDH_OPK_POOL; i++) {
         if ((rc = crypto_x25519_keypair(id->opk_sk[i], id->opk_pk[i])) != CRYPTO_SUCCESS) return rc;
@@ -139,6 +157,8 @@ crypto_error_t pqxdh_publish_bundle(const pqxdh_identity_t *id, pqxdh_bundle_t *
     memset(out, 0, sizeof *out);
     memcpy(out->ik_sig_pk, id->ik_sig_pk, QSAFE_SIG_PUB_SIZE);
     memcpy(out->ik_dh_pk, id->ik_dh_pk, X25519_KEY_SIZE);
+    memcpy(out->ik_dh_cert, id->ik_dh_cert, id->ik_dh_cert_len);
+    out->ik_dh_cert_len = id->ik_dh_cert_len;
     memcpy(out->spk_pk, id->spk_pk, X25519_KEY_SIZE);
     memcpy(out->pqk_pk, id->pqk_pk, PQXDH_MLKEM_PUB);
     out->have_opk = 0;   /* one-time prekeys are published separately, one per fetch */
@@ -172,6 +192,11 @@ crypto_error_t pqxdh_initiator(const pqxdh_identity_t *self, const pqxdh_bundle_
     if (rc != CRYPTO_SUCCESS) return rc;
     rc = verify_labeled(PQXDH_LABEL_PQK, peer->pqk_pk, PQXDH_MLKEM_PUB,
                         peer->pqk_sig, peer->pqk_sig_len, peer->ik_sig_pk);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    /* Confirm the peer's identity DH key is vouched for by its signing key, so a
+     * relay can't substitute a DH key under the pinned identity (DH1 uses it). */
+    rc = verify_labeled(PQXDH_LABEL_IDDH, peer->ik_dh_pk, X25519_KEY_SIZE,
+                        peer->ik_dh_cert, peer->ik_dh_cert_len, peer->ik_sig_pk);
     if (rc != CRYPTO_SUCCESS) return rc;
     if (peer->have_opk) {
         unsigned char om[4 + X25519_KEY_SIZE];
@@ -212,17 +237,23 @@ crypto_error_t pqxdh_initiator(const pqxdh_identity_t *self, const pqxdh_bundle_
             : ratchet_init_initiator(sk, peer->spk_pk, session_out);
     if (rc != CRYPTO_SUCCESS) goto out;
 
-    /* Assemble and sign the opening message. */
+    /* Assemble the opening message and authenticate it deniably: attach the static
+     * ik_dh self-cert, then MAC the per-handshake fields under a key derived from SK. */
     memcpy(msg_out->ik_sig_pk, self->ik_sig_pk, QSAFE_SIG_PUB_SIZE);
     memcpy(msg_out->ik_dh_pk, self->ik_dh_pk, X25519_KEY_SIZE);
+    memcpy(msg_out->ik_dh_cert, self->ik_dh_cert, self->ik_dh_cert_len);
+    msg_out->ik_dh_cert_len = self->ik_dh_cert_len;
     memcpy(msg_out->ek_pk, ek_pk, X25519_KEY_SIZE);
     memcpy(msg_out->pq_ct, pq_ct, PQXDH_MLKEM_CT);
     msg_out->opk_id = peer->have_opk ? (int64_t)peer->opk_id : -1;
     msg_out->pq = pq ? 1 : 0;
     {
-        unsigned char signbuf[INITIAL_SIGNED_LEN];
-        size_t n = initial_signed_bytes(msg_out, signbuf);
-        rc = crypto_sig_sign_buf(signbuf, n, self->ik_sig_sk, msg_out->sig, &msg_out->sig_len);
+        unsigned char macbuf[OPENING_MAC_LEN], mac_key[AES_KEY_SIZE];
+        size_t n = opening_mac_bytes(msg_out, macbuf);
+        rc = derive_open_mac_key(sk, mac_key);
+        if (rc == CRYPTO_SUCCESS)
+            rc = crypto_hmac_sha256(mac_key, sizeof mac_key, macbuf, n, msg_out->mac);
+        secure_zero(mac_key, sizeof mac_key);
         if (rc != CRYPTO_SUCCESS) { ratchet_session_free(*session_out); *session_out = NULL; }
     }
 
@@ -239,10 +270,12 @@ crypto_error_t pqxdh_responder(const pqxdh_identity_t *self, const pqxdh_initial
                                ratchet_session_t **session_out) {
     if (!self || !msg || !session_out) return CRYPTO_ERR_INVALID_INPUT;
 
-    /* Authenticate the opening message under the sender's asserted identity key. */
-    unsigned char signbuf[INITIAL_SIGNED_LEN];
-    size_t n = initial_signed_bytes(msg, signbuf);
-    crypto_error_t rc = crypto_sig_verify_buf(signbuf, n, msg->sig, msg->sig_len, msg->ik_sig_pk);
+    /* Bind the asserted DH identity to the asserted signing identity before we use
+     * ik_dh_pk in DH1 — otherwise a relay could pair the pinned signing key with a
+     * DH key it controls and impersonate the initiator. The per-handshake MAC
+     * (checked once SK is derived) authenticates the rest, deniably. */
+    crypto_error_t rc = verify_labeled(PQXDH_LABEL_IDDH, msg->ik_dh_pk, X25519_KEY_SIZE,
+                                       msg->ik_dh_cert, msg->ik_dh_cert_len, msg->ik_sig_pk);
     if (rc != CRYPTO_SUCCESS) return rc;
 
     unsigned char legs[4 * X25519_KEY_SIZE + AES_KEY_SIZE];
@@ -270,7 +303,23 @@ crypto_error_t pqxdh_responder(const pqxdh_identity_t *self, const pqxdh_initial
     memcpy(legs + off, pq_ss, AES_KEY_SIZE); off += AES_KEY_SIZE;
 
     if ((rc = derive_sk(legs, off, sk)) != CRYPTO_SUCCESS) goto out;
-    /* PQ intent is authenticated (in the signed opening message), so a MITM can't
+
+    /* Authenticate the opening under SK (fail closed, constant-time compare). This
+     * is what proves the sender knows SK — i.e. holds ik_dh_A's private key (DH1) —
+     * without a transferable signature. */
+    {
+        unsigned char macbuf[OPENING_MAC_LEN], mac_key[AES_KEY_SIZE], want[32];
+        size_t n = opening_mac_bytes(msg, macbuf);
+        rc = derive_open_mac_key(sk, mac_key);
+        if (rc == CRYPTO_SUCCESS)
+            rc = crypto_hmac_sha256(mac_key, sizeof mac_key, macbuf, n, want);
+        if (rc == CRYPTO_SUCCESS && CRYPTO_memcmp(want, msg->mac, 32) != 0) rc = CRYPTO_ERR_INTEGRITY;
+        secure_zero(mac_key, sizeof mac_key);
+        secure_zero(want, sizeof want);
+        if (rc != CRYPTO_SUCCESS) goto out;
+    }
+
+    /* PQ intent is authenticated (MAC'd in the opening message), so a MITM can't
      * downgrade the ratchet to classical. */
     rc = msg->pq ? ratchet_pq_init_responder(sk, self->spk_pk, self->spk_sk, session_out)
                  : ratchet_init_responder(sk, self->spk_pk, self->spk_sk, session_out);
