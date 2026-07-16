@@ -43,3 +43,4 @@ tests/test_ratchet_kat
 tests/test_pqxdh
 tests/test_pqratchet
 tests/test_ratchet_soak
+tests/test_ratchet_he
