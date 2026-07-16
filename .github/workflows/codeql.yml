@@ -12,6 +12,7 @@ on:
   push:
     branches: [feat/v8-advanced]
   pull_request:
+  workflow_dispatch:       # manual re-trigger (push events can be dropped on non-default branches)
   schedule:
     - cron: "0 7 * * 1"   # weekly, Monday 07:00 UTC
 
