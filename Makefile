@@ -61,7 +61,7 @@ LIBRARY = libqsafe$(LIBEXT)
 SRC_DIR = src
 TEST_DIR = tests
 
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c $(SRC_DIR)/sss.c $(SRC_DIR)/vault.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/pqxdh.c $(SRC_DIR)/merkle.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c $(SRC_DIR)/sss.c $(SRC_DIR)/vault.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/pqxdh.c $(SRC_DIR)/merkle.c $(SRC_DIR)/translog.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = qsafe$(EXEEXT)
 
@@ -84,6 +84,8 @@ HE_TEST_SOURCES = $(TEST_DIR)/test_ratchet_he.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/
 HE_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet_he$(EXEEXT)
 MERKLE_TEST_SOURCES = $(TEST_DIR)/test_merkle.c $(SRC_DIR)/merkle.c
 MERKLE_TEST_EXECUTABLE = $(TEST_DIR)/test_merkle$(EXEEXT)
+TRANSLOG_TEST_SOURCES = $(TEST_DIR)/test_translog.c $(SRC_DIR)/translog.c $(SRC_DIR)/merkle.c $(SRC_DIR)/crypto_utils.c
+TRANSLOG_TEST_EXECUTABLE = $(TEST_DIR)/test_translog$(EXEEXT)
 
 # age plugin: post-quantum hybrid recipients for the age ecosystem.
 PLUGIN = age-plugin-qsafe$(EXEEXT)
@@ -117,7 +119,7 @@ $(TEST_EXECUTABLE): $(TEST_OBJECTS)
 
 # Double Ratchet: build both harnesses from source (no shared .o with the main
 # binary so sanitizer flags can be layered independently) and run them.
-test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_EXECUTABLE) $(PQRATCHET_TEST_EXECUTABLE) $(SOAK_TEST_EXECUTABLE) $(HE_TEST_EXECUTABLE) $(MERKLE_TEST_EXECUTABLE)
+test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_EXECUTABLE) $(PQRATCHET_TEST_EXECUTABLE) $(SOAK_TEST_EXECUTABLE) $(HE_TEST_EXECUTABLE) $(MERKLE_TEST_EXECUTABLE) $(TRANSLOG_TEST_EXECUTABLE)
 	./$(RATCHET_KAT_EXECUTABLE)
 	./$(RATCHET_TEST_EXECUTABLE)
 	./$(PQXDH_TEST_EXECUTABLE)
@@ -125,6 +127,7 @@ test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_
 	./$(SOAK_TEST_EXECUTABLE)
 	./$(HE_TEST_EXECUTABLE)
 	./$(MERKLE_TEST_EXECUTABLE)
+	./$(TRANSLOG_TEST_EXECUTABLE)
 
 $(PQRATCHET_TEST_EXECUTABLE): $(PQRATCHET_TEST_SOURCES) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(PQRATCHET_TEST_SOURCES) -o $@ \
@@ -136,6 +139,10 @@ $(HE_TEST_EXECUTABLE): $(HE_TEST_SOURCES) $(HEADERS)
 
 $(MERKLE_TEST_EXECUTABLE): $(MERKLE_TEST_SOURCES) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(MERKLE_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(TRANSLOG_TEST_EXECUTABLE): $(TRANSLOG_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(TRANSLOG_TEST_SOURCES) -o $@ \
 		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 $(SOAK_TEST_EXECUTABLE): $(SOAK_TEST_SOURCES) $(HEADERS)
