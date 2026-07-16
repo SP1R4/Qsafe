@@ -5,7 +5,9 @@ name: CodeQL
 # real build, so we install deps + build with `make` between CodeQL init/analyze.
 #
 # Runs on macOS: this fork needs OpenSSL 3.2+ (Argon2 EVP_KDF), which the GitHub
-# Ubuntu images lack, so the traced build fails there.
+# Ubuntu images lack, so the traced build fails there. We use macos-13 (Intel):
+# CodeQL's C/C++ tracer builds x86_64, so an Apple-Silicon runner's arm64 Homebrew
+# libs won't link — an x86_64 runner keeps compiler, libs, and extractor aligned.
 
 on:
   push:
@@ -20,7 +22,7 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: macos-latest
+    runs-on: macos-13   # Intel/x86_64 — matches CodeQL's C/C++ extractor arch
     steps:
       - name: Checkout
         uses: actions/checkout@v4
