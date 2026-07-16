@@ -11,9 +11,9 @@ name: Wheels
 # release rather than on every PR. See wheels.yml TODOs below.
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
   workflow_dispatch:
 
 jobs:

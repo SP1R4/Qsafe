@@ -6,20 +6,10 @@ name: Fuzz
 # crash makes the job fail and uploads the reproducing input as an artifact.
 
 on:
-  schedule:
-    - cron: "0 5 * * *"   # daily 05:00 UTC
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
   workflow_dispatch:
-    inputs:
-      duration:
-        description: "Fuzz duration in seconds"
-        default: "600"
-  pull_request:
-    paths:
-      - "src/**"
-      - "include/**"
-      - "tests/fuzz_decrypt.c"
-      - "tests/fuzz_vault.c"
-      - ".github/workflows/fuzz.yml"
 
 permissions:
   contents: read

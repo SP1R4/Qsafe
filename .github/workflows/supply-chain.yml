@@ -5,11 +5,9 @@ name: Supply chain
 # branch on secrets (ctgrind-style valgrind check).
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-  schedule:
-    - cron: "0 6 * * 1"   # weekly, for the deep constant-time sweep
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
   workflow_dispatch:
 
 jobs:

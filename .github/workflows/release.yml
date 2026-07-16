@@ -4,10 +4,10 @@ name: Release
 # (e.g. `git tag v5.0.0 && git push --tags`) and attaches them to the release.
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:   # manual runs build + sign artifacts (no release attach)
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
+  workflow_dispatch:
 
 permissions:
   contents: write
