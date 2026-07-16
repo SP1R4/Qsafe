@@ -301,8 +301,10 @@ crypto_error_t crypto_sig_verify_buf(const unsigned char *msg, size_t msg_len,
                                      const unsigned char pk[QSAFE_SIG_PUB_SIZE]);
 
 /* Passphrase-encrypted at-rest envelope (Argon2id 64MiB/t=3/p=1 + AES-256-GCM).
- * seal mallocs *out = salt(16)|nonce(12)|ct|tag(16); open returns the plaintext
- * (mallocs *out) or CRYPTO_ERR_INTEGRITY on a wrong passphrase / tampered blob.
+ * seal mallocs *out = salt(16)|nonce(12)|commit(32)|ct|tag(16); open returns the
+ * plaintext (mallocs *out) or CRYPTO_ERR_INTEGRITY on a wrong passphrase / tampered
+ * blob. The commit field makes the envelope KEY-COMMITTING (a blob opens under at
+ * most one key), which blocks partitioning-oracle attacks on the passphrase.
  * Reusable for any secret held at rest under a passphrase. */
 crypto_error_t crypto_seal_at_rest(const char *passphrase,
                                    const unsigned char *pt, size_t pt_len,

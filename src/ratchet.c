@@ -833,29 +833,11 @@ crypto_error_t ratchet_session_serialize(const ratchet_session_t *s,
     unsigned char *plain = malloc(plain_len);
     if (!plain) return CRYPTO_ERR_MEMORY;
     pack(s, plain);
-
-    size_t total = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + plain_len + AES_GCM_TAG_SIZE;
-    unsigned char *b = malloc(total);
-    if (!b) { secure_zero(plain, plain_len); free(plain); return CRYPTO_ERR_MEMORY; }
-
-    crypto_error_t rc = CRYPTO_ERR_CRYPTO;
-    unsigned char key[AES_KEY_SIZE];
-    if (RAND_bytes(b, KDF_SALT_SIZE) != 1 ||
-        RAND_bytes(b + KDF_SALT_SIZE, AES_GCM_NONCE_SIZE) != 1) goto done;
-    if (crypto_derive_key_argon2id(passphrase, b, 65536, 3, 1, key) != CRYPTO_SUCCESS) goto done;
-
-    unsigned char *ct = b + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
-    unsigned char tag[AES_GCM_TAG_SIZE];
-    if (!crypto_gcm_seal_aad(key, b + KDF_SALT_SIZE, NULL, 0,
-                             plain, (int)plain_len, ct, tag)) goto done;
-    memcpy(ct + plain_len, tag, AES_GCM_TAG_SIZE);
-    *blob = b; *blob_len = total; b = NULL;
-    rc = CRYPTO_SUCCESS;
-done:
-    secure_zero(key, sizeof key);
+    /* Seal through the shared key-committing envelope (Argon2id + AES-GCM + key
+     * commitment) rather than re-implementing it here. */
+    crypto_error_t rc = crypto_seal_at_rest(passphrase, plain, plain_len, blob, blob_len);
     secure_zero(plain, plain_len);
     free(plain);
-    if (b) free(b);
     return rc;
 }
 
@@ -863,30 +845,15 @@ crypto_error_t ratchet_session_deserialize(const unsigned char *blob, size_t blo
                                            const char *passphrase,
                                            ratchet_session_t **out) {
     if (!blob || !passphrase || !out) return CRYPTO_ERR_INVALID_INPUT;
-    size_t hdr = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
-    if (blob_len < hdr + AES_GCM_TAG_SIZE) return CRYPTO_ERR_INTEGRITY;
-    size_t plain_len = blob_len - hdr - AES_GCM_TAG_SIZE;
-
-    unsigned char key[AES_KEY_SIZE];
-    if (crypto_derive_key_argon2id(passphrase, blob, 65536, 3, 1, key) != CRYPTO_SUCCESS)
-        return CRYPTO_ERR_CRYPTO;
-
-    unsigned char *plain = malloc(plain_len ? plain_len : 1);
-    if (!plain) { secure_zero(key, sizeof key); return CRYPTO_ERR_MEMORY; }
-
-    const unsigned char *ct = blob + hdr;
-    int ok = crypto_gcm_open_aad(key, blob + KDF_SALT_SIZE, NULL, 0,
-                                 ct, (int)plain_len, ct + plain_len, plain);
-    secure_zero(key, sizeof key);
-    crypto_error_t rc;
-    if (!ok) { rc = CRYPTO_ERR_INTEGRITY; goto done; }
+    unsigned char *plain = NULL; size_t plain_len = 0;
+    crypto_error_t rc = crypto_open_at_rest(passphrase, blob, blob_len, &plain, &plain_len);
+    if (rc != CRYPTO_SUCCESS) return rc;
 
     ratchet_session_t *s = calloc(1, sizeof *s);
-    if (!s) { rc = CRYPTO_ERR_MEMORY; goto done; }
+    if (!s) { secure_zero(plain, plain_len); free(plain); return CRYPTO_ERR_MEMORY; }
     rc = unpack(s, plain, plain_len);
-    if (rc != CRYPTO_SUCCESS) { ratchet_session_free(s); goto done; }
-    *out = s;
-done:
+    if (rc != CRYPTO_SUCCESS) ratchet_session_free(s);
+    else *out = s;
     secure_zero(plain, plain_len);
     free(plain);
     return rc;

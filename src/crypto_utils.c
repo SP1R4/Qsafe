@@ -2285,29 +2285,57 @@ crypto_error_t crypto_sig_verify_buf(const unsigned char *msg, size_t msg_len,
 }
 
 /* --- Passphrase-encrypted at-rest envelope (Argon2id + AES-256-GCM) ---
- * Layout: salt(KDF_SALT_SIZE) | nonce(12) | ct(pt_len) | tag(16). One reusable
- * primitive for anything held at rest under a passphrase (ratchet session,
- * PQXDH identity, ...). Argon2id 64 MiB / t=3 / p=1. */
+ * Layout: salt(KDF_SALT_SIZE) | nonce(12) | commit(32) | ct(pt_len) | tag(16). One
+ * reusable primitive for anything held at rest under a passphrase (ratchet session,
+ * PQXDH identity, ...). Argon2id 64 MiB / t=3 / p=1.
+ *
+ * KEY COMMITMENT: AES-GCM is not key-committing, so a single ciphertext can be
+ * crafted to open validly under two different keys — the basis of partitioning-
+ * oracle attacks that speed up guessing a low-entropy passphrase. We split the
+ * Argon2id output into an encryption subkey and a published commitment subkey; the
+ * commitment binds the ciphertext to exactly one key, so at most one passphrase can
+ * ever open a given blob. (The per-message ratchet AEAD is deliberately not
+ * committed: its keys are high-entropy, single-use HKDF outputs an attacker cannot
+ * grind.) */
+#define AT_REST_COMMIT_SIZE 32
+static crypto_error_t at_rest_subkeys(const unsigned char key[AES_KEY_SIZE],
+                                      unsigned char ke[AES_KEY_SIZE],
+                                      unsigned char kc[AT_REST_COMMIT_SIZE]) {
+    static const char ENC[] = "Veil-AtRest-Enc-v1", COMMIT[] = "Veil-AtRest-Commit-v1";
+    crypto_error_t rc = crypto_hkdf_sha256(key, AES_KEY_SIZE, NULL, 0,
+                                           (const unsigned char *)ENC, sizeof ENC - 1,
+                                           ke, AES_KEY_SIZE);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    return crypto_hkdf_sha256(key, AES_KEY_SIZE, NULL, 0,
+                              (const unsigned char *)COMMIT, sizeof COMMIT - 1,
+                              kc, AT_REST_COMMIT_SIZE);
+}
+
 crypto_error_t crypto_seal_at_rest(const char *passphrase,
                                    const unsigned char *pt, size_t pt_len,
                                    unsigned char **out, size_t *out_len) {
     if (!passphrase || (!pt && pt_len) || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
-    size_t total = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + pt_len + AES_GCM_TAG_SIZE;
+    size_t total = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + AT_REST_COMMIT_SIZE + pt_len + AES_GCM_TAG_SIZE;
     unsigned char *b = malloc(total);
     if (!b) return CRYPTO_ERR_MEMORY;
     crypto_error_t rc = CRYPTO_ERR_CRYPTO;
-    unsigned char key[AES_KEY_SIZE];
+    unsigned char key[AES_KEY_SIZE], ke[AES_KEY_SIZE], kc[AT_REST_COMMIT_SIZE];
     if (RAND_bytes(b, KDF_SALT_SIZE) != 1 ||
         RAND_bytes(b + KDF_SALT_SIZE, AES_GCM_NONCE_SIZE) != 1) goto done;
     if (crypto_derive_key_argon2id(passphrase, b, 65536, 3, 1, key) != CRYPTO_SUCCESS) goto done;
-    unsigned char *ct = b + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    if (at_rest_subkeys(key, ke, kc) != CRYPTO_SUCCESS) goto done;
+    unsigned char *commit = b + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    memcpy(commit, kc, AT_REST_COMMIT_SIZE);
+    unsigned char *ct = commit + AT_REST_COMMIT_SIZE;
     unsigned char tag[AES_GCM_TAG_SIZE];
-    if (!crypto_gcm_seal_aad(key, b + KDF_SALT_SIZE, NULL, 0, pt, (int)pt_len, ct, tag)) goto done;
+    if (!crypto_gcm_seal_aad(ke, b + KDF_SALT_SIZE, NULL, 0, pt, (int)pt_len, ct, tag)) goto done;
     memcpy(ct + pt_len, tag, AES_GCM_TAG_SIZE);
     *out = b; *out_len = total; b = NULL;
     rc = CRYPTO_SUCCESS;
 done:
     OPENSSL_cleanse(key, sizeof key);
+    OPENSSL_cleanse(ke, sizeof ke);
+    OPENSSL_cleanse(kc, sizeof kc);
     if (b) free(b);
     return rc;
 }
@@ -2316,18 +2344,29 @@ crypto_error_t crypto_open_at_rest(const char *passphrase,
                                    const unsigned char *blob, size_t blob_len,
                                    unsigned char **out, size_t *out_len) {
     if (!passphrase || !blob || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
-    size_t hdr = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    size_t hdr = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + AT_REST_COMMIT_SIZE;
     if (blob_len < hdr + AES_GCM_TAG_SIZE) return CRYPTO_ERR_INTEGRITY;
     size_t pt_len = blob_len - hdr - AES_GCM_TAG_SIZE;
-    unsigned char key[AES_KEY_SIZE];
+    unsigned char key[AES_KEY_SIZE], ke[AES_KEY_SIZE], kc[AT_REST_COMMIT_SIZE];
     if (crypto_derive_key_argon2id(passphrase, blob, 65536, 3, 1, key) != CRYPTO_SUCCESS)
         return CRYPTO_ERR_CRYPTO;
-    unsigned char *pt = malloc(pt_len ? pt_len : 1);
-    if (!pt) { OPENSSL_cleanse(key, sizeof key); return CRYPTO_ERR_MEMORY; }
-    const unsigned char *ct = blob + hdr;
-    int ok = crypto_gcm_open_aad(key, blob + KDF_SALT_SIZE, NULL, 0,
-                                 ct, (int)pt_len, ct + pt_len, pt);
+    crypto_error_t rc = at_rest_subkeys(key, ke, kc);
     OPENSSL_cleanse(key, sizeof key);
+    if (rc != CRYPTO_SUCCESS) { OPENSSL_cleanse(ke, sizeof ke); OPENSSL_cleanse(kc, sizeof kc); return rc; }
+    /* Verify the key commitment before trusting the AEAD (constant-time). This is
+     * what makes the envelope key-committing: a blob opens under at most one key. */
+    const unsigned char *commit = blob + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    if (CRYPTO_memcmp(commit, kc, AT_REST_COMMIT_SIZE) != 0) {
+        OPENSSL_cleanse(ke, sizeof ke); OPENSSL_cleanse(kc, sizeof kc);
+        return CRYPTO_ERR_INTEGRITY;
+    }
+    OPENSSL_cleanse(kc, sizeof kc);
+    unsigned char *pt = malloc(pt_len ? pt_len : 1);
+    if (!pt) { OPENSSL_cleanse(ke, sizeof ke); return CRYPTO_ERR_MEMORY; }
+    const unsigned char *ct = blob + hdr;
+    int ok = crypto_gcm_open_aad(ke, blob + KDF_SALT_SIZE, NULL, 0,
+                                 ct, (int)pt_len, ct + pt_len, pt);
+    OPENSSL_cleanse(ke, sizeof ke);
     if (!ok) { OPENSSL_cleanse(pt, pt_len); free(pt); return CRYPTO_ERR_INTEGRITY; }
     *out = pt; *out_len = pt_len;
     return CRYPTO_SUCCESS;

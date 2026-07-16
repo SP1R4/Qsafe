@@ -104,6 +104,15 @@ int main(void) {
         CHECK(ratchet_session_deserialize(blob, blen, "pw", &C2) == CRYPTO_SUCCESS, "PQ session deserialize");
         ratchet_session_t *bad = NULL;
         CHECK(ratchet_session_deserialize(blob, blen, "wrong", &bad) == CRYPTO_ERR_INTEGRITY, "PQ wrong passphrase rejected");
+        /* Key commitment: corrupting the commit field (right after salt|nonce) must
+         * be caught independently of the GCM tag — the envelope is key-committing. */
+        {
+            unsigned char *t = malloc(blen); memcpy(t, blob, blen);
+            t[KDF_SALT_SIZE + AES_GCM_NONCE_SIZE] ^= 0x01;
+            ratchet_session_t *cbad = NULL;
+            CHECK(ratchet_session_deserialize(t, blen, "pw", &cbad) == CRYPTO_ERR_INTEGRITY, "tampered key-commitment rejected");
+            free(t);
+        }
         free(blob);
         CHECK(C2 && ratchet_hdr_size(C2) == RATCHET_PQ_HDR_SIZE, "restored session is PQ");
 
