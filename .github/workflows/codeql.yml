@@ -1,13 +1,12 @@
 name: CodeQL
 
-# Deep dataflow static analysis of the C sources (incl. the PQ crypto: ratchet,
-# pqxdh, crypto_utils). Results appear in the repo's Security tab. C/C++ needs a
-# real build, so we install deps + build with `make` between CodeQL init/analyze.
+# Dataflow static analysis of the C sources (incl. the PQ crypto: ratchet, pqxdh,
+# crypto_utils). Results appear in the repo's Security tab.
 #
-# Runs on macOS: this fork needs OpenSSL 3.2+ (Argon2 EVP_KDF), which the GitHub
-# Ubuntu images lack, so the traced build fails there. We use macos-13 (Intel):
-# CodeQL's C/C++ tracer builds x86_64, so an Apple-Silicon runner's arm64 Homebrew
-# libs won't link — an x86_64 runner keeps compiler, libs, and extractor aligned.
+# Uses CodeQL's buildless C/C++ extraction (build-mode: none): no compile step, so
+# it sidesteps this fork's OpenSSL 3.2 (Argon2) requirement — absent from the GitHub
+# Ubuntu images — and the CodeQL-extractor arch mismatch on Apple-Silicon runners.
+# Runs natively on ubuntu-latest (fast, no dependency install).
 
 on:
   push:
@@ -22,21 +21,16 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: macos-13   # Intel/x86_64 — matches CodeQL's C/C++ extractor arch
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install dependencies (OpenSSL 3.x + liboqs)
-        run: brew install openssl@3 liboqs
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
-
-      - name: Build (traced by CodeQL)
-        run: make
+          build-mode: none
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
