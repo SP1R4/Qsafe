@@ -18,6 +18,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read          # private repo: CodeQL reads workflow-run metadata when uploading SARIF
 
 jobs:
   analyze:
