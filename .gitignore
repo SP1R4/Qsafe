@@ -44,3 +44,5 @@ tests/test_pqxdh
 tests/test_pqratchet
 tests/test_ratchet_soak
 tests/test_ratchet_he
+
+tests/test_merkle
