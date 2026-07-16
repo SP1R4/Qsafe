@@ -80,6 +80,8 @@ PQRATCHET_TEST_SOURCES = $(TEST_DIR)/test_pqratchet.c $(SRC_DIR)/ratchet.c $(SRC
 PQRATCHET_TEST_EXECUTABLE = $(TEST_DIR)/test_pqratchet$(EXEEXT)
 SOAK_TEST_SOURCES = $(TEST_DIR)/test_ratchet_soak.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
 SOAK_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet_soak$(EXEEXT)
+HE_TEST_SOURCES = $(TEST_DIR)/test_ratchet_he.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+HE_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet_he$(EXEEXT)
 
 # age plugin: post-quantum hybrid recipients for the age ecosystem.
 PLUGIN = age-plugin-qsafe$(EXEEXT)
@@ -113,15 +115,20 @@ $(TEST_EXECUTABLE): $(TEST_OBJECTS)
 
 # Double Ratchet: build both harnesses from source (no shared .o with the main
 # binary so sanitizer flags can be layered independently) and run them.
-test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_EXECUTABLE) $(PQRATCHET_TEST_EXECUTABLE) $(SOAK_TEST_EXECUTABLE)
+test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_EXECUTABLE) $(PQRATCHET_TEST_EXECUTABLE) $(SOAK_TEST_EXECUTABLE) $(HE_TEST_EXECUTABLE)
 	./$(RATCHET_KAT_EXECUTABLE)
 	./$(RATCHET_TEST_EXECUTABLE)
 	./$(PQXDH_TEST_EXECUTABLE)
 	./$(PQRATCHET_TEST_EXECUTABLE)
 	./$(SOAK_TEST_EXECUTABLE)
+	./$(HE_TEST_EXECUTABLE)
 
 $(PQRATCHET_TEST_EXECUTABLE): $(PQRATCHET_TEST_SOURCES) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(PQRATCHET_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(HE_TEST_EXECUTABLE): $(HE_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(HE_TEST_SOURCES) -o $@ \
 		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 $(SOAK_TEST_EXECUTABLE): $(SOAK_TEST_SOURCES) $(HEADERS)

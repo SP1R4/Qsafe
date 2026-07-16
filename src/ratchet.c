@@ -28,6 +28,7 @@ typedef struct {
     unsigned char dh_pub[X25519_KEY_SIZE];
     uint32_t n;
     unsigned char mk[AES_KEY_SIZE];
+    unsigned char hk[AES_KEY_SIZE];   /* receiving header key of the chain (HE only) */
 } skipped_key_t;
 
 struct ratchet_session {
@@ -39,6 +40,12 @@ struct ratchet_session {
     unsigned char ckr[AES_KEY_SIZE];                /* receiving chain key */
     uint32_t ns, nr, pn;                            /* counters */
     int have_dhr, have_cks, have_ckr;
+
+    /* Header encryption (HEADER_ENCRYPTION.md). Zero/unused when he == 0. */
+    int he;
+    int have_hks, have_hkr, have_nhks, have_nhkr;
+    unsigned char hks[AES_KEY_SIZE], hkr[AES_KEY_SIZE];     /* current header keys */
+    unsigned char nhks[AES_KEY_SIZE], nhkr[AES_KEY_SIZE];   /* next header keys */
 
     /* Continuous/periodic PQ ratchet (PQ_RATCHET*.md). Zero/unused when pq == 0. */
     int pq;
@@ -59,6 +66,7 @@ struct ratchet_session {
 };
 
 size_t ratchet_hdr_size(const ratchet_session_t *s) {
+    if (s && s->he) return RATCHET_HE_HDR_SIZE;
     return (s && s->pq) ? RATCHET_PQ_HDR_SIZE : RATCHET_HDR_SIZE;
 }
 
@@ -87,22 +95,27 @@ static crypto_error_t kdf_rk(const unsigned char rk[AES_KEY_SIZE],
                              const unsigned char dh_out[X25519_KEY_SIZE],
                              const unsigned char *kem_ss, size_t kem_ss_len,
                              unsigned char rk_out[AES_KEY_SIZE],
-                             unsigned char ck_out[AES_KEY_SIZE]) {
+                             unsigned char ck_out[AES_KEY_SIZE],
+                             unsigned char *nhk_out /* nullable: HE next-header key */) {
     unsigned char ikm[X25519_KEY_SIZE + RATCHET_MLKEM_SS];
     memcpy(ikm, dh_out, X25519_KEY_SIZE);
     if (kem_ss && kem_ss_len) memcpy(ikm + X25519_KEY_SIZE, kem_ss, kem_ss_len);
     size_t ikm_len = X25519_KEY_SIZE + (kem_ss ? kem_ss_len : 0);
 
-    unsigned char okm[2 * AES_KEY_SIZE];
+    /* HKDF-Expand is a prefix stream, so the first two 32-byte blocks are identical
+     * whether or not we ask for the third — the classical/PQ outputs are unchanged. */
+    unsigned char okm[3 * AES_KEY_SIZE];
+    size_t want = nhk_out ? 3 * AES_KEY_SIZE : 2 * AES_KEY_SIZE;
     crypto_error_t rc = crypto_hkdf_sha256(ikm, ikm_len,
                                            rk, AES_KEY_SIZE,
                                            (const unsigned char *)RATCHET_LABEL_RK,
                                            strlen(RATCHET_LABEL_RK),
-                                           okm, sizeof okm);
+                                           okm, want);
     secure_zero(ikm, sizeof ikm);
     if (rc != CRYPTO_SUCCESS) return rc;
     memcpy(rk_out, okm, AES_KEY_SIZE);
     memcpy(ck_out, okm + AES_KEY_SIZE, AES_KEY_SIZE);
+    if (nhk_out) memcpy(nhk_out, okm + 2 * AES_KEY_SIZE, AES_KEY_SIZE);
     secure_zero(okm, sizeof okm);
     return CRYPTO_SUCCESS;
 }
@@ -165,7 +178,7 @@ crypto_error_t ratchet_init_initiator(const unsigned char sk[AES_KEY_SIZE],
     unsigned char dh_out[X25519_KEY_SIZE];
     rc = crypto_x25519_dh(s->dhs_sec, s->dhr, dh_out);
     if (rc != CRYPTO_SUCCESS) goto fail;
-    rc = kdf_rk(sk, dh_out, NULL, 0, s->rk, s->cks);   /* bootstrap: no KEM secret yet */
+    rc = kdf_rk(sk, dh_out, NULL, 0, s->rk, s->cks, NULL);   /* bootstrap: no KEM secret yet */
     secure_zero(dh_out, sizeof dh_out);
     if (rc != CRYPTO_SUCCESS) goto fail;
     s->have_cks = 1;
@@ -250,6 +263,7 @@ static crypto_error_t skip_message_keys(ratchet_session_t *s, uint32_t until) {
         skipped_key_t *e = &s->skipped[s->n_skipped];
         memcpy(e->dh_pub, s->dhr, X25519_KEY_SIZE);
         e->n = s->nr;
+        if (s->he) memcpy(e->hk, s->hkr, AES_KEY_SIZE);   /* to trial-decrypt later */
         crypto_error_t rc = kdf_ck(s->ckr, s->ckr, e->mk);
         if (rc != CRYPTO_SUCCESS) return rc;
         s->n_skipped++;
@@ -293,7 +307,7 @@ static crypto_error_t dh_ratchet(ratchet_session_t *s, const unsigned char new_d
     if (rc != CRYPTO_SUCCESS) goto out;
     rc = kdf_rk(s->rk, dh_out,
                 s->have_kss_recv ? s->kss_recv : NULL, s->have_kss_recv ? RATCHET_MLKEM_SS : 0,
-                s->rk, s->ckr);
+                s->rk, s->ckr, NULL);
     if (rc != CRYPTO_SUCCESS) goto out;
     s->have_ckr = 1;
 
@@ -328,7 +342,7 @@ static crypto_error_t dh_ratchet(ratchet_session_t *s, const unsigned char new_d
     if (rc != CRYPTO_SUCCESS) goto out;
     rc = kdf_rk(s->rk, dh_out,
                 s->have_kss_send ? s->kss_send : NULL, s->have_kss_send ? RATCHET_MLKEM_SS : 0,
-                s->rk, s->cks);
+                s->rk, s->cks, NULL);
     if (rc != CRYPTO_SUCCESS) goto out;
     s->have_cks = 1;
     rc = CRYPTO_SUCCESS;
@@ -340,11 +354,19 @@ out:
 
 /* --- messaging --- */
 
+/* Header-encryption variants, defined after the classical/PQ path below. */
+static crypto_error_t ratchet_encrypt_he(ratchet_session_t *s, const unsigned char *pt, size_t pt_len,
+                                         unsigned char *hdr, unsigned char *out, size_t *out_len);
+static crypto_error_t ratchet_decrypt_he(ratchet_session_t *s, const unsigned char *hdr,
+                                         const unsigned char *ct, size_t ct_len,
+                                         unsigned char *out, size_t *out_len);
+
 crypto_error_t ratchet_encrypt(ratchet_session_t *s,
                                const unsigned char *pt, size_t pt_len,
                                unsigned char *hdr,
                                unsigned char *out, size_t *out_len) {
     if (!s || (!pt && pt_len) || !hdr || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    if (s->he) return ratchet_encrypt_he(s, pt, pt_len, hdr, out, out_len);
     if (!s->have_cks) return CRYPTO_ERR_INVALID_INPUT;         /* cannot send yet */
     if (pt_len > INT32_MAX) return CRYPTO_ERR_INVALID_INPUT;
 
@@ -399,6 +421,7 @@ crypto_error_t ratchet_decrypt(ratchet_session_t *s,
                                const unsigned char *ct, size_t ct_len,
                                unsigned char *out, size_t *out_len) {
     if (!s || !hdr || !ct || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    if (s->he) return ratchet_decrypt_he(s, hdr, ct, ct_len, out, out_len);
     if (hdr[0] != 1) return CRYPTO_ERR_INVALID_INPUT;
     if (s->pq) { if (hdr[1] != RATCHET_TYPE_PQ_FULL && hdr[1] != RATCHET_TYPE_PQ_LITE) return CRYPTO_ERR_INVALID_INPUT; }
     else       { if (hdr[1] != RATCHET_TYPE_CLASSICAL) return CRYPTO_ERR_INVALID_INPUT; }
@@ -464,6 +487,234 @@ done:
     secure_zero(w, sizeof *w);
     free(w);
     return rc;
+}
+
+/* --- header encryption (veil/docs/HEADER_ENCRYPTION.md) ---
+ * The header (dh_pub|PN|N) is itself AES-256-GCM encrypted under a per-epoch header
+ * key, so the relay sees only opaque bytes and can't link a chain's messages. Only
+ * the classical ratchet is HE-enabled for now (not PQ). */
+
+/* Derive the two shared initial header keys from the PQXDH secret SK. */
+static crypto_error_t derive_he_hdr_keys(const unsigned char sk[AES_KEY_SIZE],
+                                         unsigned char hka[AES_KEY_SIZE],
+                                         unsigned char nhkb[AES_KEY_SIZE]) {
+    crypto_error_t rc = crypto_hkdf_sha256(sk, AES_KEY_SIZE, NULL, 0,
+                                           (const unsigned char *)RATCHET_LABEL_HKA, strlen(RATCHET_LABEL_HKA),
+                                           hka, AES_KEY_SIZE);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    return crypto_hkdf_sha256(sk, AES_KEY_SIZE, NULL, 0,
+                              (const unsigned char *)RATCHET_LABEL_NHKB, strlen(RATCHET_LABEL_NHKB),
+                              nhkb, AES_KEY_SIZE);
+}
+
+/* Seal the 40-byte plaintext header under `hk`: out = nonce | ct | tag (68B). */
+static crypto_error_t he_header_seal(const unsigned char hk[AES_KEY_SIZE],
+                                     const unsigned char hpt[RATCHET_HE_HDRPT],
+                                     unsigned char out[RATCHET_HE_HDR_SIZE]) {
+    if (RAND_bytes(out, AES_GCM_NONCE_SIZE) != 1) return CRYPTO_ERR_CRYPTO;
+    if (!crypto_gcm_seal_aad(hk, out, NULL, 0, hpt, RATCHET_HE_HDRPT,
+                             out + AES_GCM_NONCE_SIZE,
+                             out + AES_GCM_NONCE_SIZE + RATCHET_HE_HDRPT))
+        return CRYPTO_ERR_CRYPTO;
+    return CRYPTO_SUCCESS;
+}
+
+/* Try to open an HE header under `hk`. Returns 1 and fills hpt_out on success. */
+static int he_header_open(const unsigned char hk[AES_KEY_SIZE],
+                          const unsigned char in[RATCHET_HE_HDR_SIZE],
+                          unsigned char hpt_out[RATCHET_HE_HDRPT]) {
+    return crypto_gcm_open_aad(hk, in, NULL, 0,
+                               in + AES_GCM_NONCE_SIZE, RATCHET_HE_HDRPT,
+                               in + AES_GCM_NONCE_SIZE + RATCHET_HE_HDRPT, hpt_out);
+}
+
+static void he_hdr_build(unsigned char hpt[RATCHET_HE_HDRPT],
+                         const unsigned char dh_pub[X25519_KEY_SIZE], uint32_t pn, uint32_t n) {
+    memcpy(hpt, dh_pub, X25519_KEY_SIZE);
+    unsigned char *p = hpt + X25519_KEY_SIZE;
+    p[0]=(unsigned char)(pn>>24); p[1]=(unsigned char)(pn>>16); p[2]=(unsigned char)(pn>>8); p[3]=(unsigned char)pn;
+    p[4]=(unsigned char)(n>>24);  p[5]=(unsigned char)(n>>16);  p[6]=(unsigned char)(n>>8);  p[7]=(unsigned char)n;
+}
+
+static void he_hdr_parse(const unsigned char hpt[RATCHET_HE_HDRPT],
+                         unsigned char dh_pub[X25519_KEY_SIZE], uint32_t *pn, uint32_t *n) {
+    memcpy(dh_pub, hpt, X25519_KEY_SIZE);
+    const unsigned char *p = hpt + X25519_KEY_SIZE;
+    *pn = ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
+    *n  = ((uint32_t)p[4]<<24)|((uint32_t)p[5]<<16)|((uint32_t)p[6]<<8)|p[7];
+}
+
+/* DH ratchet step for HE: promote next header keys to current, then derive fresh
+ * next header keys alongside the new chains (Signal DHRatchetHE). */
+static crypto_error_t dh_ratchet_he(ratchet_session_t *s, const unsigned char new_dhr[X25519_KEY_SIZE]) {
+    s->pn = s->ns; s->ns = 0; s->nr = 0;
+    memcpy(s->dhr, new_dhr, X25519_KEY_SIZE); s->have_dhr = 1;
+
+    memcpy(s->hks, s->nhks, AES_KEY_SIZE); s->have_hks = s->have_nhks;
+    memcpy(s->hkr, s->nhkr, AES_KEY_SIZE); s->have_hkr = s->have_nhkr;
+
+    unsigned char dh_out[X25519_KEY_SIZE];
+    crypto_error_t rc = crypto_x25519_dh(s->dhs_sec, s->dhr, dh_out);
+    if (rc != CRYPTO_SUCCESS) goto out;
+    rc = kdf_rk(s->rk, dh_out, NULL, 0, s->rk, s->ckr, s->nhkr);
+    if (rc != CRYPTO_SUCCESS) goto out;
+    s->have_ckr = 1; s->have_nhkr = 1;
+
+    rc = crypto_x25519_keypair(s->dhs_sec, s->dhs_pub);
+    if (rc != CRYPTO_SUCCESS) goto out;
+    rc = crypto_x25519_dh(s->dhs_sec, s->dhr, dh_out);
+    if (rc != CRYPTO_SUCCESS) goto out;
+    rc = kdf_rk(s->rk, dh_out, NULL, 0, s->rk, s->cks, s->nhks);
+    if (rc != CRYPTO_SUCCESS) goto out;
+    s->have_cks = 1; s->have_nhks = 1;
+    rc = CRYPTO_SUCCESS;
+out:
+    secure_zero(dh_out, sizeof dh_out);
+    return rc;
+}
+
+static crypto_error_t ratchet_encrypt_he(ratchet_session_t *s, const unsigned char *pt, size_t pt_len,
+                                         unsigned char *hdr, unsigned char *out, size_t *out_len) {
+    if (!s->have_cks || !s->have_hks) return CRYPTO_ERR_INVALID_INPUT;   /* cannot send yet */
+    if (pt_len > INT32_MAX) return CRYPTO_ERR_INVALID_INPUT;
+
+    unsigned char mk[AES_KEY_SIZE];
+    crypto_error_t rc = kdf_ck(s->cks, s->cks, mk);
+    if (rc != CRYPTO_SUCCESS) return rc;
+
+    unsigned char hpt[RATCHET_HE_HDRPT];
+    he_hdr_build(hpt, s->dhs_pub, s->pn, s->ns);
+    rc = he_header_seal(s->hks, hpt, hdr);          /* writes RATCHET_HE_HDR_SIZE bytes */
+    secure_zero(hpt, sizeof hpt);
+    if (rc != CRYPTO_SUCCESS) { secure_zero(mk, sizeof mk); return rc; }
+
+    unsigned char nonce[AES_GCM_NONCE_SIZE];
+    crypto_frame_nonce(s->ns, 0, nonce);
+    unsigned char tag[AES_GCM_TAG_SIZE];
+    int ok = crypto_gcm_seal_aad(mk, nonce, hdr, RATCHET_HE_HDR_SIZE, pt, (int)pt_len, out, tag);
+    secure_zero(mk, sizeof mk);
+    if (!ok) return CRYPTO_ERR_CRYPTO;
+    memcpy(out + pt_len, tag, AES_GCM_TAG_SIZE);
+    *out_len = pt_len + AES_GCM_TAG_SIZE;
+    s->ns++;
+    return CRYPTO_SUCCESS;
+}
+
+static crypto_error_t ratchet_decrypt_he(ratchet_session_t *s, const unsigned char *hdr,
+                                         const unsigned char *ct, size_t ct_len,
+                                         unsigned char *out, size_t *out_len) {
+    /* Transactional: mutate a copy, commit only after the body tag verifies. */
+    ratchet_session_t *w = malloc(sizeof *w);
+    if (!w) return CRYPTO_ERR_MEMORY;
+    memcpy(w, s, sizeof *w);
+
+    unsigned char mk[AES_KEY_SIZE], hpt[RATCHET_HE_HDRPT], dh[X25519_KEY_SIZE];
+    uint32_t pn, n;
+    crypto_error_t rc;
+
+    /* 1. Stored skipped key: trial-decrypt the header under each entry's header key. */
+    for (size_t i = 0; i < w->n_skipped; i++) {
+        if (!he_header_open(w->skipped[i].hk, hdr, hpt)) continue;
+        he_hdr_parse(hpt, dh, &pn, &n);
+        if (n != w->skipped[i].n || memcmp(dh, w->skipped[i].dh_pub, X25519_KEY_SIZE) != 0) continue;
+        memcpy(mk, w->skipped[i].mk, AES_KEY_SIZE);
+        rc = open_with_mk(mk, n, hdr, RATCHET_HE_HDR_SIZE, ct, ct_len, out, out_len);
+        if (rc == CRYPTO_SUCCESS) { skipped_remove(w, &w->skipped[i]); memcpy(s, w, sizeof *w); }
+        goto done;
+    }
+
+    /* 2. Current chain (HKr) or a new epoch (NHKr). */
+    if (w->have_hkr && he_header_open(w->hkr, hdr, hpt)) {
+        he_hdr_parse(hpt, dh, &pn, &n);
+    } else if (w->have_nhkr && he_header_open(w->nhkr, hdr, hpt)) {
+        he_hdr_parse(hpt, dh, &pn, &n);
+        rc = skip_message_keys(w, pn);                 /* finish the old chain */
+        if (rc != CRYPTO_SUCCESS) goto done;
+        rc = dh_ratchet_he(w, dh);
+        if (rc != CRYPTO_SUCCESS) goto done;
+    } else {
+        rc = CRYPTO_ERR_INTEGRITY; goto done;          /* header authenticates under no key */
+    }
+
+    /* 3. Skip within the current receiving chain up to n. */
+    rc = skip_message_keys(w, n);
+    if (rc != CRYPTO_SUCCESS) goto done;
+    if (!w->have_ckr) { rc = CRYPTO_ERR_INTEGRITY; goto done; }
+
+    /* 4. Derive this message's key and open; commit only if it authenticates. */
+    rc = kdf_ck(w->ckr, w->ckr, mk);
+    if (rc != CRYPTO_SUCCESS) goto done;
+    rc = open_with_mk(mk, n, hdr, RATCHET_HE_HDR_SIZE, ct, ct_len, out, out_len);
+    if (rc != CRYPTO_SUCCESS) goto done;
+    w->nr++;
+    memcpy(s, w, sizeof *w);   /* commit */
+
+done:
+    secure_zero(mk, sizeof mk);
+    secure_zero(hpt, sizeof hpt);
+    secure_zero(w, sizeof *w);
+    free(w);
+    return rc;
+}
+
+crypto_error_t ratchet_he_init_initiator(const unsigned char sk[AES_KEY_SIZE],
+                                         const unsigned char peer_dh_pub[X25519_KEY_SIZE],
+                                         ratchet_session_t **out) {
+    if (!sk || !peer_dh_pub || !out) return CRYPTO_ERR_INVALID_INPUT;
+    ratchet_session_t *s = calloc(1, sizeof *s);
+    if (!s) return CRYPTO_ERR_MEMORY;
+
+    crypto_error_t rc = crypto_x25519_keypair(s->dhs_sec, s->dhs_pub);
+    if (rc != CRYPTO_SUCCESS) goto fail;
+    memcpy(s->dhr, peer_dh_pub, X25519_KEY_SIZE);
+    s->have_dhr = 1;
+
+    unsigned char dh_out[X25519_KEY_SIZE];
+    rc = crypto_x25519_dh(s->dhs_sec, s->dhr, dh_out);
+    if (rc != CRYPTO_SUCCESS) { secure_zero(dh_out, sizeof dh_out); goto fail; }
+    rc = kdf_rk(sk, dh_out, NULL, 0, s->rk, s->cks, s->nhks);   /* also seeds NHKs */
+    secure_zero(dh_out, sizeof dh_out);
+    if (rc != CRYPTO_SUCCESS) goto fail;
+    s->have_cks = 1; s->have_nhks = 1;
+
+    unsigned char hka[AES_KEY_SIZE], nhkb[AES_KEY_SIZE];
+    rc = derive_he_hdr_keys(sk, hka, nhkb);
+    if (rc != CRYPTO_SUCCESS) { secure_zero(hka, sizeof hka); secure_zero(nhkb, sizeof nhkb); goto fail; }
+    memcpy(s->hks, hka, AES_KEY_SIZE);   s->have_hks = 1;   /* our epoch-0 sending header key */
+    memcpy(s->nhkr, nhkb, AES_KEY_SIZE); s->have_nhkr = 1;  /* next receiving header key */
+    secure_zero(hka, sizeof hka); secure_zero(nhkb, sizeof nhkb);
+
+    s->he = 1;
+    *out = s;
+    return CRYPTO_SUCCESS;
+fail:
+    ratchet_session_free(s);
+    return rc;
+}
+
+crypto_error_t ratchet_he_init_responder(const unsigned char sk[AES_KEY_SIZE],
+                                          const unsigned char self_dh_pub[X25519_KEY_SIZE],
+                                          const unsigned char self_dh_sec[X25519_KEY_SIZE],
+                                          ratchet_session_t **out) {
+    if (!sk || !self_dh_pub || !self_dh_sec || !out) return CRYPTO_ERR_INVALID_INPUT;
+    ratchet_session_t *s = calloc(1, sizeof *s);
+    if (!s) return CRYPTO_ERR_MEMORY;
+
+    memcpy(s->dhs_sec, self_dh_sec, X25519_KEY_SIZE);
+    memcpy(s->dhs_pub, self_dh_pub, X25519_KEY_SIZE);
+    memcpy(s->rk, sk, AES_KEY_SIZE);
+
+    unsigned char hka[AES_KEY_SIZE], nhkb[AES_KEY_SIZE];
+    crypto_error_t rc = derive_he_hdr_keys(sk, hka, nhkb);
+    if (rc != CRYPTO_SUCCESS) { secure_zero(hka, sizeof hka); secure_zero(nhkb, sizeof nhkb);
+                               ratchet_session_free(s); return rc; }
+    memcpy(s->nhks, nhkb, AES_KEY_SIZE); s->have_nhks = 1;  /* our first sending header key */
+    memcpy(s->nhkr, hka, AES_KEY_SIZE);  s->have_nhkr = 1;  /* == initiator's epoch-0 HKs */
+    secure_zero(hka, sizeof hka); secure_zero(nhkb, sizeof nhkb);
+    /* DHr, CKs, CKr, HKr unset until the first inbound message triggers a DH ratchet. */
+    s->he = 1;
+    *out = s;
+    return CRYPTO_SUCCESS;
 }
 
 /* --- state at rest (SPEC.md §7) ---
@@ -575,6 +826,9 @@ crypto_error_t ratchet_session_serialize(const ratchet_session_t *s,
                                          const char *passphrase,
                                          unsigned char **blob, size_t *blob_len) {
     if (!s || !passphrase || !blob || !blob_len) return CRYPTO_ERR_INVALID_INPUT;
+    /* HE header-key state is not yet serialized (lands with the veil wiring); refuse
+     * rather than silently drop it and resume a broken session. */
+    if (s->he) return CRYPTO_ERR_INVALID_INPUT;
     size_t plain_len = ST_FIXED + s->n_skipped * ST_SKIP_ENTRY + 1 + (s->pq ? ST_PQ_META + ST_KEM : 0);
     unsigned char *plain = malloc(plain_len);
     if (!plain) return CRYPTO_ERR_MEMORY;

@@ -34,6 +34,10 @@
 #define RATCHET_LABEL_RK      "Veil-RK-v1"
 #define RATCHET_LABEL_CK_NEXT "Veil-CK-next"
 #define RATCHET_LABEL_CK_MSG  "Veil-CK-msg"
+/* Header-encryption (HE) initial header keys, derived from the PQXDH secret SK
+ * (veil/docs/HEADER_ENCRYPTION.md). */
+#define RATCHET_LABEL_HKA     "Veil-HE-HKA-v1"
+#define RATCHET_LABEL_NHKB    "Veil-HE-NHKB-v1"
 
 /* Wire header, authenticated as AAD on every ratchet message (SPEC.md §3.1):
  *   ver(1) | type(1) | dh_pub(32) | PN(4,BE) | N(4,BE)  = 42 bytes.
@@ -64,6 +68,14 @@
 #define RATCHET_TYPE_CLASSICAL 0x02
 #define RATCHET_TYPE_PQ_FULL   0x03
 #define RATCHET_TYPE_PQ_LITE   0x04
+
+/* Header encryption (veil/docs/HEADER_ENCRYPTION.md). The on-wire header is an
+ * AES-GCM box over a 40-byte plaintext header (dh_pub|PN|N) under a per-epoch
+ * header key: nonce(12) | ct(40) | tag(16) = 68 bytes. There is no cleartext type
+ * byte, so ratchet_hdr_size_of() does NOT apply to HE messages — callers size the
+ * header via ratchet_hdr_size(session). Classical HE only for now (not PQ). */
+#define RATCHET_HE_HDRPT   (X25519_KEY_SIZE + 4 + 4)
+#define RATCHET_HE_HDR_SIZE (AES_GCM_NONCE_SIZE + RATCHET_HE_HDRPT + AES_GCM_TAG_SIZE)
 
 /* Actual on-wire header size for a message, from its type byte (hdr[1]). A caller
  * that received or produced a header uses this to locate the ciphertext; a PQ
@@ -107,6 +119,20 @@ crypto_error_t ratchet_pq_init_initiator(const unsigned char sk[AES_KEY_SIZE],
                                          const unsigned char peer_dh_pub[X25519_KEY_SIZE],
                                          ratchet_session_t **out);
 crypto_error_t ratchet_pq_init_responder(const unsigned char sk[AES_KEY_SIZE],
+                                          const unsigned char self_dh_pub[X25519_KEY_SIZE],
+                                          const unsigned char self_dh_sec[X25519_KEY_SIZE],
+                                          ratchet_session_t **out);
+
+/* --- Header-encryption establishment (veil/docs/HEADER_ENCRYPTION.md) ---
+ * Same shape as the classical inits but with header encryption enabled: the
+ * message header (dh_pub, counters) is itself AEAD-encrypted so the relay sees
+ * only opaque bytes and cannot link a chain's messages. Initial header keys are
+ * derived from `sk`. Mutually exclusive with the PQ ratchet for now. Sessions are
+ * NOT yet serializable (ratchet_session_serialize rejects an HE session). */
+crypto_error_t ratchet_he_init_initiator(const unsigned char sk[AES_KEY_SIZE],
+                                         const unsigned char peer_dh_pub[X25519_KEY_SIZE],
+                                         ratchet_session_t **out);
+crypto_error_t ratchet_he_init_responder(const unsigned char sk[AES_KEY_SIZE],
                                           const unsigned char self_dh_pub[X25519_KEY_SIZE],
                                           const unsigned char self_dh_sec[X25519_KEY_SIZE],
                                           ratchet_session_t **out);
