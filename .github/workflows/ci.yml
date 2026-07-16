@@ -4,22 +4,29 @@ on:
   push:
   pull_request:
 
-# qsafe-pq (the PQ messaging fork) builds against OpenSSL 3.2+ (Argon2 EVP_KDF) and
-# liboqs. macOS runners provide both via Homebrew, matching the dev environment;
-# the GitHub Ubuntu images still ship OpenSSL 3.0, whose headers lack the Argon2
-# KDF params, so the build there fails independently of this fork's code.
+# qsafe-pq builds against OpenSSL 3.2+ (Argon2 EVP_KDF) and liboqs. The GitHub
+# Ubuntu images ship OpenSSL 3.0 and no liboqs, so the setup-pq-deps composite
+# action builds both from source into ~/pqdeps and caches them. We point the
+# Makefile at that prefix via EXTRA_CFLAGS/EXTRA_LDFLAGS, and embed an rpath so
+# the produced binaries load our OpenSSL 3.2 at runtime rather than the system
+# 3.0 (both share the libssl.so.3 SONAME). Ubuntu bills at 1x vs macOS 10x.
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies (OpenSSL 3.x + liboqs)
-        run: brew install openssl@3 liboqs
+      - name: Setup PQ deps (OpenSSL 3.2+ / liboqs)
+        id: pq
+        uses: ./.github/actions/setup-pq-deps
 
       - name: Build (warnings are errors)
-        run: make EXTRA_CFLAGS="-Werror"
+        run: |
+          make EXTRA_CFLAGS="-I${{ steps.pq.outputs.prefix }}/include -Werror" \
+               EXTRA_LDFLAGS="-L${{ steps.pq.outputs.prefix }}/lib -Wl,-rpath,${{ steps.pq.outputs.prefix }}/lib"
 
       - name: Unit tests + ratchet / PQXDH / PQ-ratchet / soak suite
-        run: make test
+        run: |
+          make test EXTRA_CFLAGS="-I${{ steps.pq.outputs.prefix }}/include" \
+                    EXTRA_LDFLAGS="-L${{ steps.pq.outputs.prefix }}/lib -Wl,-rpath,${{ steps.pq.outputs.prefix }}/lib"

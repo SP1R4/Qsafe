@@ -4,34 +4,34 @@ name: Hardening
 # test suite (unit, ratchet, PQXDH, PQ-ratchet, soak) under AddressSanitizer +
 # UndefinedBehaviorSanitizer.
 #
-# Runs on macOS: this fork needs OpenSSL 3.2+ (Argon2 EVP_KDF) which the GitHub
-# Ubuntu images lack. Two checks from the upstream Ubuntu job are intentionally
-# dropped here: Valgrind (unsupported on current macOS/arm64 — ASan covers the
-# same ground) and the libFuzzer smoke run (libFuzzer hangs on macOS/arm64; the
-# wire-parser fuzzing lives in the veil repo's own deterministic ASan fuzzer).
-
+# Runs on Ubuntu (1x billing vs macOS 10x). OpenSSL 3.2+ (Argon2 EVP_KDF) and
+# liboqs are built from source and cached by the setup-pq-deps composite action.
+# Two checks from the original upstream Ubuntu job stay dropped: Valgrind (ASan
+# covers the same ground) and the libFuzzer smoke run (the wire-parser fuzzing
+# lives in the veil repo's own deterministic ASan fuzzer).
 on:
   push:
   pull_request:
 
 jobs:
   hardening:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies (OpenSSL 3.x + liboqs)
-        run: brew install openssl@3 liboqs
+      - name: Setup PQ deps (OpenSSL 3.2+ / liboqs)
+        id: pq
+        uses: ./.github/actions/setup-pq-deps
 
       - name: Build & test under ASan/UBSan
         env:
-          # Library one-time globals (OpenSSL/liboqs) are not leaks we own; macOS
-          # ASan has no leak detector anyway.
+          # OpenSSL/liboqs one-time globals are not leaks we own; Linux has a
+          # LeakSanitizer (unlike macOS) that would flag them, so disable it.
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           make clean
           make test \
-            EXTRA_CFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1" \
-            EXTRA_LDFLAGS="-fsanitize=address,undefined"
+            EXTRA_CFLAGS="-I${{ steps.pq.outputs.prefix }}/include -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1" \
+            EXTRA_LDFLAGS="-L${{ steps.pq.outputs.prefix }}/lib -Wl,-rpath,${{ steps.pq.outputs.prefix }}/lib -fsanitize=address,undefined"
