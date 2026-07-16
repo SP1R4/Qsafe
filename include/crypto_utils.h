@@ -61,6 +61,7 @@
 /* ML-DSA-87 sizes (FIPS 204); asserted against liboqs at runtime. */
 #define QSAFE_SIG_PUB_SIZE 2592
 #define QSAFE_SIG_MAX_SIZE 4627
+#define QSAFE_SIG_SEC_SIZE 4896
 
 /* Signed-sender trailer: signer_pub(2592) | u16 sig_len | signature zero-padded
  * to QSAFE_SIG_MAX_SIZE. Fixed size so a streaming reader can hold it back. */
@@ -187,6 +188,14 @@ crypto_error_t crypto_dearmor(const char *in_path, const char *out_path);
  * encrypted payload size. Never decrypts. */
 crypto_error_t crypto_inspect_file(const char *filename, OQS_KEM *kem, const crypto_config_t *config);
 
+/* Raw X25519 keypair / DH, exposed for the ratchet module (include/ratchet.h).
+ * out and peer_pub are 32 raw bytes; DH computes the shared point (not yet KDF'd).
+ * Return CRYPTO_SUCCESS or CRYPTO_ERR_CRYPTO. */
+crypto_error_t crypto_x25519_keypair(unsigned char sec[X25519_KEY_SIZE], unsigned char pub[X25519_KEY_SIZE]);
+crypto_error_t crypto_x25519_dh(const unsigned char sec[X25519_KEY_SIZE],
+                                const unsigned char peer_pub[X25519_KEY_SIZE],
+                                unsigned char out[X25519_KEY_SIZE]);
+
 /* HKDF-SHA256: derive a 32-byte AES key from a high-entropy KEM shared secret. */
 crypto_error_t crypto_derive_aes_key(const unsigned char *shared_secret, size_t secret_len, unsigned char *aes_key);
 
@@ -269,6 +278,31 @@ crypto_error_t crypto_sign_file(const char *input_filename, const char *sig_file
  * Returns CRYPTO_SUCCESS only if the signature is valid. */
 crypto_error_t crypto_verify_signature(const char *input_filename, const char *sig_file,
                                        const char *sig_pk_file, const crypto_config_t *config);
+
+/* Raw in-memory ML-DSA-87 sign/verify/keypair, exposed for the PQXDH module
+ * (include/pqxdh.h), which signs prekey-bundle fields in memory rather than
+ * files. Unlike crypto_sign_file (which signs a SHA-256 digest of a file),
+ * these sign the message bytes directly. sig_out needs QSAFE_SIG_MAX_SIZE bytes.
+ * verify returns CRYPTO_ERR_INTEGRITY on a bad signature (fail closed). */
+crypto_error_t crypto_sig_keypair_raw(unsigned char pk[QSAFE_SIG_PUB_SIZE],
+                                      unsigned char sk[QSAFE_SIG_SEC_SIZE]);
+crypto_error_t crypto_sig_sign_buf(const unsigned char *msg, size_t msg_len,
+                                   const unsigned char sk[QSAFE_SIG_SEC_SIZE],
+                                   unsigned char *sig_out, size_t *sig_len);
+crypto_error_t crypto_sig_verify_buf(const unsigned char *msg, size_t msg_len,
+                                     const unsigned char *sig, size_t sig_len,
+                                     const unsigned char pk[QSAFE_SIG_PUB_SIZE]);
+
+/* Passphrase-encrypted at-rest envelope (Argon2id 64MiB/t=3/p=1 + AES-256-GCM).
+ * seal mallocs *out = salt(16)|nonce(12)|ct|tag(16); open returns the plaintext
+ * (mallocs *out) or CRYPTO_ERR_INTEGRITY on a wrong passphrase / tampered blob.
+ * Reusable for any secret held at rest under a passphrase. */
+crypto_error_t crypto_seal_at_rest(const char *passphrase,
+                                   const unsigned char *pt, size_t pt_len,
+                                   unsigned char **out, size_t *out_len);
+crypto_error_t crypto_open_at_rest(const char *passphrase,
+                                   const unsigned char *blob, size_t blob_len,
+                                   unsigned char **out, size_t *out_len);
 
 /* --- Framed-AEAD primitives (§2.3 of docs/FORMAT.md), exposed for reuse by
  * modules that build their own container format on the same convention

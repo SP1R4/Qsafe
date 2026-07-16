@@ -38,3 +38,8 @@ __pycache__/
 
 # keyring test scratch
 qsafe_keyring_test_*/
+tests/test_ratchet
+tests/test_ratchet_kat
+tests/test_pqxdh
+tests/test_pqratchet
+tests/test_ratchet_soak

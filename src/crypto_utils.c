@@ -774,6 +774,19 @@ static int x25519_dh(const unsigned char sec[X25519_KEY_SIZE],
     return ok;
 }
 
+/* Public wrappers over the static X25519 helpers, exposed for the ratchet module
+ * (include/ratchet.h), whose PQXDH handshake and DH ratchet need raw X25519
+ * keypairs and DH separately from the packaged hybrid wrap. */
+crypto_error_t crypto_x25519_keypair(unsigned char sec[X25519_KEY_SIZE], unsigned char pub[X25519_KEY_SIZE]) {
+    return x25519_keypair(sec, pub) == 1 ? CRYPTO_SUCCESS : CRYPTO_ERR_CRYPTO;
+}
+
+crypto_error_t crypto_x25519_dh(const unsigned char sec[X25519_KEY_SIZE],
+                                const unsigned char peer_pub[X25519_KEY_SIZE],
+                                unsigned char out[X25519_KEY_SIZE]) {
+    return x25519_dh(sec, peer_pub, out) == 1 ? CRYPTO_SUCCESS : CRYPTO_ERR_CRYPTO;
+}
+
 /* AES-256-GCM seal/open of a small buffer (used to wrap the CEK per recipient).
  * Returns 1 on success; gcm_open returns 0 if the tag does not verify. */
 static int gcm_seal(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
@@ -2212,4 +2225,99 @@ done:
     free(signature);
     OQS_SIG_free(sig);
     return ret;
+}
+
+/* --- Raw in-memory ML-DSA-87 (for the PQXDH module) --- */
+
+crypto_error_t crypto_sig_keypair_raw(unsigned char pk[QSAFE_SIG_PUB_SIZE],
+                                      unsigned char sk[QSAFE_SIG_SEC_SIZE]) {
+    OQS_SIG *sig = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!sig) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_CRYPTO;
+    if (sig->length_public_key == QSAFE_SIG_PUB_SIZE &&
+        sig->length_secret_key == QSAFE_SIG_SEC_SIZE &&
+        OQS_SIG_keypair(sig, pk, sk) == OQS_SUCCESS)
+        ret = CRYPTO_SUCCESS;
+    OQS_SIG_free(sig);
+    return ret;
+}
+
+crypto_error_t crypto_sig_sign_buf(const unsigned char *msg, size_t msg_len,
+                                   const unsigned char sk[QSAFE_SIG_SEC_SIZE],
+                                   unsigned char *sig_out, size_t *sig_len) {
+    if ((!msg && msg_len) || !sk || !sig_out || !sig_len) return CRYPTO_ERR_INVALID_INPUT;
+    OQS_SIG *sig = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!sig) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_CRYPTO;
+    size_t sl = 0;
+    if (sig->length_secret_key == QSAFE_SIG_SEC_SIZE &&
+        OQS_SIG_sign(sig, sig_out, &sl, msg, msg_len, sk) == OQS_SUCCESS) {
+        *sig_len = sl;
+        ret = CRYPTO_SUCCESS;
+    }
+    OQS_SIG_free(sig);
+    return ret;
+}
+
+crypto_error_t crypto_sig_verify_buf(const unsigned char *msg, size_t msg_len,
+                                     const unsigned char *sig, size_t sig_len,
+                                     const unsigned char pk[QSAFE_SIG_PUB_SIZE]) {
+    if ((!msg && msg_len) || !sig || !pk) return CRYPTO_ERR_INVALID_INPUT;
+    OQS_SIG *s = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!s) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_INTEGRITY;
+    if (s->length_public_key == QSAFE_SIG_PUB_SIZE &&
+        OQS_SIG_verify(s, msg, msg_len, sig, sig_len, pk) == OQS_SUCCESS)
+        ret = CRYPTO_SUCCESS;
+    OQS_SIG_free(s);
+    return ret;
+}
+
+/* --- Passphrase-encrypted at-rest envelope (Argon2id + AES-256-GCM) ---
+ * Layout: salt(KDF_SALT_SIZE) | nonce(12) | ct(pt_len) | tag(16). One reusable
+ * primitive for anything held at rest under a passphrase (ratchet session,
+ * PQXDH identity, ...). Argon2id 64 MiB / t=3 / p=1. */
+crypto_error_t crypto_seal_at_rest(const char *passphrase,
+                                   const unsigned char *pt, size_t pt_len,
+                                   unsigned char **out, size_t *out_len) {
+    if (!passphrase || (!pt && pt_len) || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    size_t total = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + pt_len + AES_GCM_TAG_SIZE;
+    unsigned char *b = malloc(total);
+    if (!b) return CRYPTO_ERR_MEMORY;
+    crypto_error_t rc = CRYPTO_ERR_CRYPTO;
+    unsigned char key[AES_KEY_SIZE];
+    if (RAND_bytes(b, KDF_SALT_SIZE) != 1 ||
+        RAND_bytes(b + KDF_SALT_SIZE, AES_GCM_NONCE_SIZE) != 1) goto done;
+    if (crypto_derive_key_argon2id(passphrase, b, 65536, 3, 1, key) != CRYPTO_SUCCESS) goto done;
+    unsigned char *ct = b + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    unsigned char tag[AES_GCM_TAG_SIZE];
+    if (!crypto_gcm_seal_aad(key, b + KDF_SALT_SIZE, NULL, 0, pt, (int)pt_len, ct, tag)) goto done;
+    memcpy(ct + pt_len, tag, AES_GCM_TAG_SIZE);
+    *out = b; *out_len = total; b = NULL;
+    rc = CRYPTO_SUCCESS;
+done:
+    OPENSSL_cleanse(key, sizeof key);
+    if (b) free(b);
+    return rc;
+}
+
+crypto_error_t crypto_open_at_rest(const char *passphrase,
+                                   const unsigned char *blob, size_t blob_len,
+                                   unsigned char **out, size_t *out_len) {
+    if (!passphrase || !blob || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    size_t hdr = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    if (blob_len < hdr + AES_GCM_TAG_SIZE) return CRYPTO_ERR_INTEGRITY;
+    size_t pt_len = blob_len - hdr - AES_GCM_TAG_SIZE;
+    unsigned char key[AES_KEY_SIZE];
+    if (crypto_derive_key_argon2id(passphrase, blob, 65536, 3, 1, key) != CRYPTO_SUCCESS)
+        return CRYPTO_ERR_CRYPTO;
+    unsigned char *pt = malloc(pt_len ? pt_len : 1);
+    if (!pt) { OPENSSL_cleanse(key, sizeof key); return CRYPTO_ERR_MEMORY; }
+    const unsigned char *ct = blob + hdr;
+    int ok = crypto_gcm_open_aad(key, blob + KDF_SALT_SIZE, NULL, 0,
+                                 ct, (int)pt_len, ct + pt_len, pt);
+    OPENSSL_cleanse(key, sizeof key);
+    if (!ok) { OPENSSL_cleanse(pt, pt_len); free(pt); return CRYPTO_ERR_INTEGRITY; }
+    *out = pt; *out_len = pt_len;
+    return CRYPTO_SUCCESS;
 }
