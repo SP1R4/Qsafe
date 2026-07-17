@@ -47,3 +47,4 @@ tests/test_ratchet_he
 
 tests/test_merkle
 tests/test_translog
+tests/test_group
