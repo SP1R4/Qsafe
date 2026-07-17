@@ -91,6 +91,18 @@ void treekem_export(const treekem_t *t, treekem_public_t *out);
 crypto_error_t treekem_import(treekem_t **out, const treekem_public_t *pub, uint32_t my_leaf,
                               const unsigned char my_leaf_priv[TREEKEM_MLKEM_SK]);
 
+/* --- serialization for transport (commit fan-out) and the Welcome tree --- */
+
+crypto_error_t treekem_commit_serialize(const treekem_commit_t *c, unsigned char **buf, size_t *len);
+crypto_error_t treekem_commit_deserialize(const unsigned char *buf, size_t len, treekem_commit_t *c);
+crypto_error_t treekem_public_serialize(const treekem_public_t *p, unsigned char **buf, size_t *len);
+crypto_error_t treekem_public_deserialize(const unsigned char *buf, size_t len, treekem_public_t *p);
+
+/* Derive a labelled secret (e.g. a group message key) from the current epoch's root
+ * secret. Returns CRYPTO_ERR_INVALID_INPUT if no root secret has been established. */
+crypto_error_t treekem_export_secret(const treekem_t *t, const char *label,
+                                     unsigned char *out, size_t out_len);
+
 void treekem_free(treekem_t *t);
 
 #endif /* QSAFE_TREEKEM_H */

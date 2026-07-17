@@ -296,6 +296,103 @@ crypto_error_t treekem_import(treekem_t **out, const treekem_public_t *pub, uint
     return CRYPTO_SUCCESS;
 }
 
+/* --- serialization --- */
+static void wr32(unsigned char *p, uint32_t v) { p[0]=(unsigned char)(v>>24);p[1]=(unsigned char)(v>>16);p[2]=(unsigned char)(v>>8);p[3]=(unsigned char)v; }
+static uint32_t rd32(const unsigned char *p) { return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3]; }
+#define SEALED (SEC + AES_GCM_TAG_SIZE)
+
+crypto_error_t treekem_commit_serialize(const treekem_commit_t *c, unsigned char **buf, size_t *len) {
+    if (!c || !buf || !len || c->n_steps > TREEKEM_MAX_PATH) return CRYPTO_ERR_INVALID_INPUT;
+    size_t n = 4 + 4 + PK;                                   /* sender_leaf | n_steps | leaf_pub */
+    for (uint32_t s = 0; s < c->n_steps; s++) {
+        if (c->step[s].n_enc > TREEKEM_MAX_RES) return CRYPTO_ERR_INVALID_INPUT;
+        n += 4 + PK + 4 + (size_t)c->step[s].n_enc * (4 + CT + SEALED);
+    }
+    unsigned char *b = malloc(n); if (!b) return CRYPTO_ERR_MEMORY;
+    unsigned char *q = b;
+    wr32(q, c->sender_leaf); q += 4;
+    wr32(q, c->n_steps); q += 4;
+    memcpy(q, c->leaf_pub, PK); q += PK;
+    for (uint32_t s = 0; s < c->n_steps; s++) {
+        const treekem_step_t *st = &c->step[s];
+        wr32(q, st->node); q += 4;
+        memcpy(q, st->pub, PK); q += PK;
+        wr32(q, st->n_enc); q += 4;
+        for (uint32_t i = 0; i < st->n_enc; i++) {
+            wr32(q, st->enc[i].recipient); q += 4;
+            memcpy(q, st->enc[i].ct, CT); q += CT;
+            memcpy(q, st->enc[i].sealed, SEALED); q += SEALED;
+        }
+    }
+    *buf = b; *len = n;
+    return CRYPTO_SUCCESS;
+}
+
+crypto_error_t treekem_commit_deserialize(const unsigned char *buf, size_t len, treekem_commit_t *c) {
+    if (!buf || !c) return CRYPTO_ERR_INVALID_INPUT;
+    const unsigned char *q = buf, *end = buf + len;
+    memset(c, 0, sizeof *c);
+    if (end - q < 8 + (long)PK) return CRYPTO_ERR_INTEGRITY;
+    c->sender_leaf = rd32(q); q += 4;
+    c->n_steps = rd32(q); q += 4;
+    if (c->n_steps > TREEKEM_MAX_PATH) return CRYPTO_ERR_INTEGRITY;
+    memcpy(c->leaf_pub, q, PK); q += PK;
+    for (uint32_t s = 0; s < c->n_steps; s++) {
+        treekem_step_t *st = &c->step[s];
+        if (end - q < 4 + (long)PK + 4) return CRYPTO_ERR_INTEGRITY;
+        st->node = rd32(q); q += 4;
+        memcpy(st->pub, q, PK); q += PK;
+        st->n_enc = rd32(q); q += 4;
+        if (st->n_enc > TREEKEM_MAX_RES) return CRYPTO_ERR_INTEGRITY;
+        for (uint32_t i = 0; i < st->n_enc; i++) {
+            if (end - q < 4 + (long)CT + (long)SEALED) return CRYPTO_ERR_INTEGRITY;
+            st->enc[i].recipient = rd32(q); q += 4;
+            memcpy(st->enc[i].ct, q, CT); q += CT;
+            memcpy(st->enc[i].sealed, q, SEALED); q += SEALED;
+        }
+    }
+    return (q == end) ? CRYPTO_SUCCESS : CRYPTO_ERR_INTEGRITY;
+}
+
+crypto_error_t treekem_public_serialize(const treekem_public_t *p, unsigned char **buf, size_t *len) {
+    if (!p || !buf || !len || p->n_leaves < 2 || p->n_leaves > TREEKEM_MAX_LEAVES) return CRYPTO_ERR_INVALID_INPUT;
+    uint32_t present = 0, top = 2 * p->n_leaves - 1;
+    for (uint32_t i = 1; i <= top; i++) if (p->node[i].has_pub) present++;
+    size_t n = 4 + 4 + (size_t)present * (4 + PK);
+    unsigned char *b = malloc(n); if (!b) return CRYPTO_ERR_MEMORY;
+    unsigned char *q = b;
+    wr32(q, p->n_leaves); q += 4;
+    wr32(q, present); q += 4;
+    for (uint32_t i = 1; i <= top; i++)
+        if (p->node[i].has_pub) { wr32(q, i); q += 4; memcpy(q, p->node[i].pub, PK); q += PK; }
+    *buf = b; *len = n;
+    return CRYPTO_SUCCESS;
+}
+
+crypto_error_t treekem_public_deserialize(const unsigned char *buf, size_t len, treekem_public_t *p) {
+    if (!buf || !p) return CRYPTO_ERR_INVALID_INPUT;
+    const unsigned char *q = buf, *end = buf + len;
+    memset(p, 0, sizeof *p);
+    if (end - q < 8) return CRYPTO_ERR_INTEGRITY;
+    p->n_leaves = rd32(q); q += 4;
+    uint32_t present = rd32(q); q += 4;
+    if (p->n_leaves < 2 || p->n_leaves > TREEKEM_MAX_LEAVES || !is_pow2(p->n_leaves)) return CRYPTO_ERR_INTEGRITY;
+    uint32_t top = 2 * p->n_leaves - 1;
+    for (uint32_t k = 0; k < present; k++) {
+        if (end - q < 4 + (long)PK) return CRYPTO_ERR_INTEGRITY;
+        uint32_t idx = rd32(q); q += 4;
+        if (idx < 1 || idx > top) return CRYPTO_ERR_INTEGRITY;
+        p->node[idx].has_pub = 1; memcpy(p->node[idx].pub, q, PK); q += PK;
+    }
+    return (q == end) ? CRYPTO_SUCCESS : CRYPTO_ERR_INTEGRITY;
+}
+
+crypto_error_t treekem_export_secret(const treekem_t *t, const char *label,
+                                     unsigned char *out, size_t out_len) {
+    if (!t || !t->have_root || !label || !out) return CRYPTO_ERR_INVALID_INPUT;
+    return kdf(t->root_secret, SEC, label, out, out_len);
+}
+
 void treekem_free(treekem_t *t) {
     if (!t) return;
     zero(t, sizeof *t);

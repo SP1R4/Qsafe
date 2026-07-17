@@ -123,11 +123,57 @@ static void run_dynamic(void) {
     free(pubs); free(privs); free(c); free(welcome);
 }
 
+/* Serialization for transport + epoch secret export. */
+static void run_serial(void) {
+    const uint32_t N = 4;
+    unsigned char (*pubs)[TREEKEM_MLKEM_PK] = malloc(N * TREEKEM_MLKEM_PK);
+    unsigned char (*privs)[TREEKEM_MLKEM_SK] = malloc(N * TREEKEM_MLKEM_SK);
+    treekem_t *t[4]; treekem_commit_t *c = malloc(sizeof *c), *c2 = malloc(sizeof *c2);
+    for (uint32_t m = 0; m < N; m++) treekem_keygen(pubs[m], privs[m]);
+    for (uint32_t m = 0; m < N; m++) treekem_init(&t[m], N, m, pubs, privs[m]);
+
+    treekem_commit(t[0], c);
+    /* A commit survives a serialize/deserialize round-trip and still processes. */
+    unsigned char *cb = NULL; size_t cl = 0;
+    CHECK(treekem_commit_serialize(c, &cb, &cl) == CRYPTO_SUCCESS, "commit serialize");
+    CHECK(treekem_commit_deserialize(cb, cl, c2) == CRYPTO_SUCCESS, "commit deserialize");
+    CHECK(treekem_process(t[1], c2) == CRYPTO_SUCCESS &&
+          memcmp(treekem_root_secret(t[1]), treekem_root_secret(t[0]), TREEKEM_SECRET) == 0,
+          "deserialized commit converges to the committer's root");
+    /* Bounds-checked parser: truncated or malformed wire commits are rejected. */
+    treekem_commit_t *cbad = malloc(sizeof *cbad);
+    CHECK(treekem_commit_deserialize(cb, cl - 1, cbad) != CRYPTO_SUCCESS, "truncated wire commit rejected");
+    CHECK(treekem_commit_deserialize(cb, 4, cbad) != CRYPTO_SUCCESS, "short wire commit rejected");
+    { unsigned char *cc = malloc(cl); memcpy(cc, cb, cl); cc[7] = 0xff;   /* absurd n_steps */
+      CHECK(treekem_commit_deserialize(cc, cl, cbad) != CRYPTO_SUCCESS, "oversized n_steps rejected"); free(cc); }
+    free(cbad); free(cb);
+
+    /* Epoch export: converged members derive the same labelled secret. */
+    treekem_process(t[2], c); treekem_process(t[3], c);
+    unsigned char k0[32], k1[32];
+    CHECK(treekem_export_secret(t[0], "veil-mls-app", k0, 32) == CRYPTO_SUCCESS &&
+          treekem_export_secret(t[1], "veil-mls-app", k1, 32) == CRYPTO_SUCCESS &&
+          memcmp(k0, k1, 32) == 0, "epoch export_secret agrees across members");
+
+    /* Public tree (Welcome) round-trips. */
+    treekem_public_t *pt = malloc(sizeof *pt), *pt2 = malloc(sizeof *pt2);
+    treekem_export(t[0], pt);
+    unsigned char *pb = NULL; size_t pl = 0;
+    CHECK(treekem_public_serialize(pt, &pb, &pl) == CRYPTO_SUCCESS &&
+          treekem_public_deserialize(pb, pl, pt2) == CRYPTO_SUCCESS &&
+          pt2->n_leaves == pt->n_leaves, "public tree serialize/deserialize round-trips");
+    free(pb);
+
+    for (uint32_t m = 0; m < N; m++) treekem_free(t[m]);
+    free(pubs); free(privs); free(c); free(c2); free(pt); free(pt2);
+}
+
 int main(void) {
     run(2, "N=2");
     run(4, "N=4");
     run(8, "N=8");
     run_dynamic();
+    run_serial();
 
     /* A commit cannot be processed by its own author, and a random member's root is
      * unset before any commit. */
