@@ -96,6 +96,35 @@ int main(void) {
     CHECK(group_decrypt(&B_fromA2, fr, frl, pt, &pl) == CRYPTO_SUCCESS && memcmp(pt, "rotated", 7) == 0, "rotated sender key works");
     CHECK(group_decrypt(&B_fromA, fr, frl, pt, &pl) == CRYPTO_ERR_INTEGRITY, "old chain rejects rotated-key message");
 
+    /* 7. State at rest: serialize/restore sender and receiver mid-stream and keep going. */
+    {
+        unsigned char *sb = NULL; size_t sbl = 0;
+        CHECK(group_sender_serialize(&A2, "pw", &sb, &sbl) == CRYPTO_SUCCESS, "sender serialize");
+        group_sender_t A2r;
+        CHECK(group_sender_deserialize(sb, sbl, "pw", &A2r) == CRYPTO_SUCCESS, "sender deserialize");
+        group_sender_t bad_s;
+        CHECK(group_sender_deserialize(sb, sbl, "wrong", &bad_s) == CRYPTO_ERR_INTEGRITY, "sender wrong passphrase rejected");
+
+        unsigned char *rb = NULL; size_t rbl = 0;
+        CHECK(group_receiver_serialize(&B_fromA2, "pw", &rb, &rbl) == CRYPTO_SUCCESS, "receiver serialize");
+        group_receiver_t B_fromA2r;
+        CHECK(group_receiver_deserialize(rb, rbl, "pw", &B_fromA2r) == CRYPTO_SUCCESS, "receiver deserialize");
+
+        /* Restored sender continues its chain; restored receiver decrypts it. */
+        unsigned char fc[FRAME_MAX]; size_t fcl;
+        group_encrypt(&A2r, (const unsigned char *)"after-restore", 13, fc, &fcl);
+        CHECK(group_decrypt(&B_fromA2r, fc, fcl, pt, &pl) == CRYPTO_SUCCESS && memcmp(pt, "after-restore", 13) == 0,
+              "restored sender+receiver resume the chain");
+
+        unsigned char tb = rb[rbl / 2]; rb[rbl / 2] ^= 1;
+        group_receiver_t bad_r;
+        CHECK(group_receiver_deserialize(rb, rbl, "pw", &bad_r) == CRYPTO_ERR_INTEGRITY, "tampered receiver blob rejected");
+        rb[rbl / 2] = tb;
+
+        free(sb); free(rb);
+        group_sender_free(&A2r);
+    }
+
     group_sender_free(&A); group_sender_free(&B); group_sender_free(&forge); group_sender_free(&A2);
     printf("\n%s\n", fails ? "SOME TESTS FAILED" : "ALL TESTS PASSED");
     return fails ? 1 : 0;

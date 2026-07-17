@@ -183,5 +183,77 @@ out:
     return rc;
 }
 
+/* --- state at rest --- */
+
+crypto_error_t group_sender_serialize(const group_sender_t *s, const char *passphrase,
+                                      unsigned char **blob, size_t *blob_len) {
+    if (!s || !passphrase || !blob || !blob_len) return CRYPTO_ERR_INVALID_INPUT;
+    /* Fixed-size POD; seal its raw bytes (device-local, layout stability not a concern). */
+    return crypto_seal_at_rest(passphrase, (const unsigned char *)s, sizeof *s, blob, blob_len);
+}
+
+crypto_error_t group_sender_deserialize(const unsigned char *blob, size_t blob_len,
+                                        const char *passphrase, group_sender_t *out) {
+    if (!blob || !passphrase || !out) return CRYPTO_ERR_INVALID_INPUT;
+    unsigned char *pt = NULL; size_t pt_len = 0;
+    crypto_error_t rc = crypto_open_at_rest(passphrase, blob, blob_len, &pt, &pt_len);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    if (pt_len != sizeof *out) { secure_zero(pt, pt_len); free(pt); return CRYPTO_ERR_INTEGRITY; }
+    memcpy(out, pt, sizeof *out);
+    secure_zero(pt, pt_len); free(pt);
+    return CRYPTO_SUCCESS;
+}
+
+/* Receiver is packed compactly (only the used skipped entries) before sealing. */
+crypto_error_t group_receiver_serialize(const group_receiver_t *r, const char *passphrase,
+                                        unsigned char **blob, size_t *blob_len) {
+    if (!r || !passphrase || !blob || !blob_len) return CRYPTO_ERR_INVALID_INPUT;
+    if (r->n_skipped > GROUP_MAX_SKIP) return CRYPTO_ERR_INVALID_INPUT;
+    size_t base = GROUP_KEY_SIZE + 4 + QSAFE_SIG_PUB_SIZE + 4;
+    size_t plain_len = base + (size_t)r->n_skipped * (4 + GROUP_KEY_SIZE);
+    unsigned char *p = malloc(plain_len);
+    if (!p) return CRYPTO_ERR_MEMORY;
+    unsigned char *q = p;
+    memcpy(q, r->ck, GROUP_KEY_SIZE); q += GROUP_KEY_SIZE;
+    put_u32(q, r->index); q += 4;
+    memcpy(q, r->sig_pk, QSAFE_SIG_PUB_SIZE); q += QSAFE_SIG_PUB_SIZE;
+    put_u32(q, r->n_skipped); q += 4;
+    for (uint32_t i = 0; i < r->n_skipped; i++) {
+        put_u32(q, r->skipped[i].index); q += 4;
+        memcpy(q, r->skipped[i].mk, GROUP_KEY_SIZE); q += GROUP_KEY_SIZE;
+    }
+    crypto_error_t rc = crypto_seal_at_rest(passphrase, p, plain_len, blob, blob_len);
+    secure_zero(p, plain_len); free(p);
+    return rc;
+}
+
+crypto_error_t group_receiver_deserialize(const unsigned char *blob, size_t blob_len,
+                                          const char *passphrase, group_receiver_t *out) {
+    if (!blob || !passphrase || !out) return CRYPTO_ERR_INVALID_INPUT;
+    unsigned char *pt = NULL; size_t pt_len = 0;
+    crypto_error_t rc = crypto_open_at_rest(passphrase, blob, blob_len, &pt, &pt_len);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    size_t base = GROUP_KEY_SIZE + 4 + QSAFE_SIG_PUB_SIZE + 4;
+    crypto_error_t ret = CRYPTO_ERR_INTEGRITY;
+    if (pt_len >= base) {
+        memset(out, 0, sizeof *out);
+        const unsigned char *q = pt;
+        memcpy(out->ck, q, GROUP_KEY_SIZE); q += GROUP_KEY_SIZE;
+        out->index = get_u32(q); q += 4;
+        memcpy(out->sig_pk, q, QSAFE_SIG_PUB_SIZE); q += QSAFE_SIG_PUB_SIZE;
+        uint32_t nsk = get_u32(q); q += 4;
+        if (nsk <= GROUP_MAX_SKIP && pt_len == base + (size_t)nsk * (4 + GROUP_KEY_SIZE)) {
+            for (uint32_t i = 0; i < nsk; i++) {
+                out->skipped[i].index = get_u32(q); q += 4;
+                memcpy(out->skipped[i].mk, q, GROUP_KEY_SIZE); q += GROUP_KEY_SIZE;
+            }
+            out->n_skipped = nsk;
+            ret = CRYPTO_SUCCESS;
+        }
+    }
+    secure_zero(pt, pt_len); free(pt);
+    return ret;
+}
+
 void group_sender_free(group_sender_t *s) { if (s) secure_zero(s, sizeof *s); }
 void group_receiver_free(group_receiver_t *r) { if (r) secure_zero(r, sizeof *r); }

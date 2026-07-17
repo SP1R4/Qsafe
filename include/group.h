@@ -66,6 +66,18 @@ crypto_error_t group_encrypt(group_sender_t *s, const unsigned char *pt, size_t 
 crypto_error_t group_decrypt(group_receiver_t *r, const unsigned char *in, size_t in_len,
                              unsigned char *pt, size_t *pt_len);
 
+/* State at rest: seal/open sender and receiver chains under a passphrase (Argon2id +
+ * the key-committing AES-GCM envelope). *blob is malloc'd; the caller frees it.
+ * deserialize returns CRYPTO_ERR_INTEGRITY on a wrong passphrase or tampered blob. */
+crypto_error_t group_sender_serialize(const group_sender_t *s, const char *passphrase,
+                                      unsigned char **blob, size_t *blob_len);
+crypto_error_t group_sender_deserialize(const unsigned char *blob, size_t blob_len,
+                                        const char *passphrase, group_sender_t *out);
+crypto_error_t group_receiver_serialize(const group_receiver_t *r, const char *passphrase,
+                                        unsigned char **blob, size_t *blob_len);
+crypto_error_t group_receiver_deserialize(const unsigned char *blob, size_t blob_len,
+                                          const char *passphrase, group_receiver_t *out);
+
 /* Zeroise secret material. Safe on NULL. */
 void group_sender_free(group_sender_t *s);
 void group_receiver_free(group_receiver_t *r);
