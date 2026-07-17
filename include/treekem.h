@@ -43,7 +43,14 @@ typedef struct {
     treekem_step_t step[TREEKEM_MAX_PATH];
 } treekem_commit_t;
 
-/* Generate a random ML-KEM-1024 leaf keypair (helper for group bootstrap). */
+/* A public snapshot of the ratchet tree (no secrets) — the core of an MLS Welcome:
+ * what a joining member needs to build its view before processing the add commit. */
+typedef struct {
+    uint32_t n_leaves;
+    struct { int has_pub; unsigned char pub[TREEKEM_MLKEM_PK]; } node[TREEKEM_MAX_NODES + 1];
+} treekem_public_t;
+
+/* Generate a random ML-KEM-1024 leaf keypair (helper for group bootstrap / KeyPackage). */
 crypto_error_t treekem_keygen(unsigned char pub[TREEKEM_MLKEM_PK], unsigned char priv[TREEKEM_MLKEM_SK]);
 
 /* Build member `me`'s view of an N-leaf group: every leaf's public key is known, and
@@ -63,8 +70,26 @@ crypto_error_t treekem_process(treekem_t *t, const treekem_commit_t *c);
 /* Current 32-byte root (group) secret, or NULL if none has been established yet. */
 const unsigned char *treekem_root_secret(const treekem_t *t);
 
-/* Blank a member's leaf (removal); the next commit re-keys around it. */
+/* --- dynamic membership (Add / Remove) --- */
+
+/* Index of a free (blank) leaf to seat a new member, or -1 if the group is full. */
+int treekem_free_leaf(const treekem_t *t);
+
+/* Add a member: install the joiner's leaf public key (from their KeyPackage) into a
+ * blank leaf and blank that leaf's direct path so the next commit re-keys toward the
+ * joiner. Call before treekem_commit; the commit's sealed secrets then reach the
+ * joiner via its leaf, and treekem_export gives the joiner the tree it needs. */
+crypto_error_t treekem_add_leaf(treekem_t *t, uint32_t leaf, const unsigned char pub[TREEKEM_MLKEM_PK]);
+
+/* Blank a member's leaf (removal); the next commit re-keys around it, so the removed
+ * member cannot derive the new group secret (forward secrecy on removal). */
 void treekem_blank_leaf(treekem_t *t, uint32_t leaf);
+
+/* Public tree snapshot (the Welcome payload) / build a joiner's view from one. The
+ * joiner supplies its own leaf secret key; then it processes the add commit. */
+void treekem_export(const treekem_t *t, treekem_public_t *out);
+crypto_error_t treekem_import(treekem_t **out, const treekem_public_t *pub, uint32_t my_leaf,
+                              const unsigned char my_leaf_priv[TREEKEM_MLKEM_SK]);
 
 void treekem_free(treekem_t *t);
 

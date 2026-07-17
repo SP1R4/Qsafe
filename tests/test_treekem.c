@@ -71,10 +71,63 @@ static void run(uint32_t N, const char *tag) {
     free(pubs); free(privs); free(t); free(c);
 }
 
+/* Dynamic membership: remove a member (forward secrecy) and add a new one (Welcome). */
+static void run_dynamic(void) {
+    const uint32_t N = 4;
+    unsigned char (*pubs)[TREEKEM_MLKEM_PK] = malloc(N * TREEKEM_MLKEM_PK);
+    unsigned char (*privs)[TREEKEM_MLKEM_SK] = malloc(N * TREEKEM_MLKEM_SK);
+    treekem_t *t[4]; treekem_commit_t *c = malloc(sizeof *c);
+    for (uint32_t m = 0; m < N; m++) treekem_keygen(pubs[m], privs[m]);
+    for (uint32_t m = 0; m < N; m++) treekem_init(&t[m], N, m, pubs, privs[m]);
+    CHECK(converge(t, N, 0, c), "dynamic: initial group converges");
+    unsigned char R0[TREEKEM_SECRET]; memcpy(R0, treekem_root_secret(t[0]), TREEKEM_SECRET);
+
+    /* Remove member 3 (leaf N+3 = 7): blank it, member 0 commits. */
+    uint32_t leaf3 = N + 3;
+    treekem_blank_leaf(t[0], leaf3);
+    CHECK(treekem_commit(t[0], c) == CRYPTO_SUCCESS, "remove: committer re-keys around the removed leaf");
+    int seals_removed = 0;
+    for (uint32_t s = 0; s < c->n_steps; s++)
+        for (uint32_t i = 0; i < c->step[s].n_enc; i++)
+            if (anc(c->step[s].enc[i].recipient, leaf3)) seals_removed = 1;
+    CHECK(!seals_removed, "remove: nothing is sealed to the removed member's path (forward secrecy)");
+    int rm_ok = 1;
+    for (uint32_t m = 1; m <= 2; m++)
+        if (treekem_process(t[m], c) != CRYPTO_SUCCESS ||
+            memcmp(treekem_root_secret(t[m]), treekem_root_secret(t[0]), TREEKEM_SECRET) != 0) rm_ok = 0;
+    CHECK(rm_ok, "remove: remaining members reach the new root");
+    CHECK(treekem_process(t[3], c) != CRYPTO_SUCCESS, "remove: the removed member cannot derive the new root");
+    CHECK(memcmp(treekem_root_secret(t[0]), R0, TREEKEM_SECRET) != 0, "remove: group secret changed");
+    treekem_free(t[3]);
+
+    /* Add a fresh joiner back into the freed slot 7 (a Welcome-style join). */
+    int slot = treekem_free_leaf(t[0]);
+    CHECK(slot == (int)leaf3, "add: the freed slot is available");
+    unsigned char jpub[TREEKEM_MLKEM_PK], jpriv[TREEKEM_MLKEM_SK];
+    treekem_keygen(jpub, jpriv);
+    CHECK(treekem_add_leaf(t[0], (uint32_t)slot, jpub) == CRYPTO_SUCCESS, "add: joiner leaf installed");
+    CHECK(treekem_commit(t[0], c) == CRYPTO_SUCCESS, "add: committer commits");
+    treekem_public_t *welcome = malloc(sizeof *welcome);
+    treekem_export(t[0], welcome);
+    treekem_t *tj = NULL;
+    CHECK(treekem_import(&tj, welcome, (uint32_t)slot, jpriv) == CRYPTO_SUCCESS, "add: joiner builds its view from the Welcome");
+    const unsigned char *radd = treekem_root_secret(t[0]);
+    int add_ok = (treekem_process(tj, c) == CRYPTO_SUCCESS) &&
+                 treekem_root_secret(tj) && memcmp(treekem_root_secret(tj), radd, TREEKEM_SECRET) == 0;
+    for (uint32_t m = 1; m <= 2; m++)
+        if (treekem_process(t[m], c) != CRYPTO_SUCCESS ||
+            memcmp(treekem_root_secret(t[m]), radd, TREEKEM_SECRET) != 0) add_ok = 0;
+    CHECK(add_ok, "add: joiner and existing members converge to the same root");
+
+    treekem_free(t[0]); treekem_free(t[1]); treekem_free(t[2]); treekem_free(tj);
+    free(pubs); free(privs); free(c); free(welcome);
+}
+
 int main(void) {
     run(2, "N=2");
     run(4, "N=4");
     run(8, "N=8");
+    run_dynamic();
 
     /* A commit cannot be processed by its own author, and a random member's root is
      * unset before any commit. */

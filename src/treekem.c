@@ -251,6 +251,51 @@ void treekem_blank_leaf(treekem_t *t, uint32_t leaf) {
     }
 }
 
+int treekem_free_leaf(const treekem_t *t) {
+    if (!t) return -1;
+    for (uint32_t l = t->n_leaves; l < 2 * t->n_leaves; l++)
+        if (!t->node[l].has_pub) return (int)l;
+    return -1;
+}
+
+crypto_error_t treekem_add_leaf(treekem_t *t, uint32_t leaf, const unsigned char pub[PK]) {
+    if (!t || leaf < t->n_leaves || leaf >= 2 * t->n_leaves) return CRYPTO_ERR_INVALID_INPUT;
+    memcpy(t->node[leaf].pub, pub, PK);
+    t->node[leaf].has_pub = 1; t->node[leaf].has_priv = 0;
+    /* Blank the joiner's direct path so the next commit re-keys it and seals the path
+     * secret down to the joiner's leaf (whose resolution now bottoms out there). */
+    for (uint32_t v = parent(leaf); ; v = parent(v)) {
+        zero(&t->node[v], sizeof t->node[v]);
+        if (v == 1) break;
+    }
+    return CRYPTO_SUCCESS;
+}
+
+void treekem_export(const treekem_t *t, treekem_public_t *out) {
+    memset(out, 0, sizeof *out);
+    if (!t) return;
+    out->n_leaves = t->n_leaves;
+    for (uint32_t i = 1; i <= 2 * t->n_leaves - 1; i++)
+        if (t->node[i].has_pub) { out->node[i].has_pub = 1; memcpy(out->node[i].pub, t->node[i].pub, PK); }
+}
+
+crypto_error_t treekem_import(treekem_t **out, const treekem_public_t *pub, uint32_t my_leaf,
+                              const unsigned char my_leaf_priv[SK]) {
+    if (!out || !pub || !my_leaf_priv || pub->n_leaves < 2 ||
+        pub->n_leaves > TREEKEM_MAX_LEAVES || !is_pow2(pub->n_leaves)) return CRYPTO_ERR_INVALID_INPUT;
+    if (my_leaf < pub->n_leaves || my_leaf >= 2 * pub->n_leaves) return CRYPTO_ERR_INVALID_INPUT;
+    treekem_t *t = calloc(1, sizeof *t);
+    if (!t) return CRYPTO_ERR_MEMORY;
+    t->n_leaves = pub->n_leaves;
+    t->my_leaf = my_leaf;
+    for (uint32_t i = 1; i <= 2 * pub->n_leaves - 1; i++)
+        if (pub->node[i].has_pub) { t->node[i].has_pub = 1; memcpy(t->node[i].pub, pub->node[i].pub, PK); }
+    memcpy(t->node[my_leaf].priv, my_leaf_priv, SK);
+    t->node[my_leaf].has_priv = 1;
+    *out = t;
+    return CRYPTO_SUCCESS;
+}
+
 void treekem_free(treekem_t *t) {
     if (!t) return;
     zero(t, sizeof *t);
