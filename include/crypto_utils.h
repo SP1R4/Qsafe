@@ -120,7 +120,7 @@
 #define KEYFILE_MAGIC_SIZE 8
 
 /* Default scrypt cost: N=2^15 (~32 MiB), r=8, p=1 — matches legacy v4 keys. */
-#define SCRYPT_DEFAULT_LOG_N 15
+#define SCRYPT_DEFAULT_LOG_N 17   /* 2^17 => ~128 MiB (OWASP scrypt level); raised from 15 (~32 MiB) 2026-07-28. Self-describing format: old keyfiles decrypt with their own stored N. */
 #define SCRYPT_DEFAULT_R 8
 #define SCRYPT_DEFAULT_P 1
 

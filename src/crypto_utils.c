@@ -226,7 +226,7 @@ crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const u
         return CRYPTO_ERR_CRYPTO;
     }
 
-    /* The caller chooses N/r/p (default N=2^15, r=8, p=1 -> ~32 MiB per guess).
+    /* The caller chooses N/r/p (default N=2^17, r=8, p=1 -> ~128 MiB per guess).
      * maxmem scales with the request so a higher N is permitted but a hostile
      * key file cannot ask OpenSSL for an unbounded allocation. */
     uint64_t maxmem = 128ULL * n * r * 2; /* ~2x scrypt's working-set bound */

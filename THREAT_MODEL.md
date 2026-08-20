@@ -171,7 +171,12 @@ Qsafe is the wrong tool.
     (information-theoretic), but each share must be guarded like a key
     fragment. The share files record a SHA-256 digest of the secret blob for
     integrity, which also lets someone holding a *candidate* secret blob
-    confirm it matches a share set.
+    confirm it matches a share set. **Consequence — only split high-entropy
+    secrets.** Because that digest sits in *every* share header, a holder of a
+    *single* share (below threshold) can brute-force/confirm a *guessable*
+    secret offline — so the information-theoretic secrecy above only holds for
+    high-entropy inputs (a random key). Do **not** `split-key` a passphrase or
+    other low-entropy value; split the random key it protects instead.
 
 ---
 

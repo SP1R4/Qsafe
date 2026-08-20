@@ -4,7 +4,13 @@ All notable changes to Qsafe are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [8.0.0] - 2026-08-20
+
+The write format moves to **QSAFE007** (decrypt still reads QSAFE006/005, so
+nothing is stranded; v5/v6/v7 fixtures are pinned in CI). The QSAFE007 layout
+is now **frozen** and specified with test vectors (docs/FORMAT.md §10). This
+release also lands the deniable hidden-volume containers and the vault v2
+passphrase-addressed layer.
 
 ### Added
 - **Deniable hidden volumes** (`qsafe vault init|write|read|footprint`,
@@ -87,13 +93,17 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ≥99% of the container (the snapshot-diff property) and that `--keep` preserves
   while omission destroys — all clean under ASan/UBSan.
 
-## [8.0.0] - 2026-07-02
+### Security
+- **scrypt default cost raised 15 → 17** (~32 MiB → ~128 MiB per guess, the
+  OWASP scrypt level). Backward-compatible: the on-disk format is
+  self-describing, so existing keyfiles and vaults still decrypt with their own
+  stored parameters. Covers keyfile-at-rest and the vault default KDF;
+  public-key document encryption already uses Argon2id (64 MiB / t=3).
+- **Shamir `split-key` low-entropy caveat** documented (`include/sss.h`,
+  `THREAT_MODEL.md`): GF(256) recovery is not constant-time and acts as a
+  confirmation oracle for low-entropy inputs — only split high-entropy secrets.
 
-The write format moves to **QSAFE007** (decrypt still reads QSAFE006/005, so
-nothing is stranded; v5/v6/v7 fixtures are pinned in CI). The QSAFE007 layout
-is now **frozen** and specified with test vectors (docs/FORMAT.md §10).
-
-### Added
+### Added (QSAFE007 format layer)
 - **Embedded sender authentication** (`encrypt --sign-with <sk>`): an
   ML-DSA-87 signature over (header ‖ metadata ‖ contents) travels *inside* the
   encrypted payload and is verified automatically on decrypt/verify — the
@@ -230,7 +240,7 @@ files with a 4.x build first).
 - Switched to ML-KEM-1024; scrypt-wrapped secret keys; streaming decryption;
   CI and expanded tests.
 
-[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v7.0.0...HEAD
+[8.0.0]: https://github.com/SP1R4/Qsafe/compare/v7.0.0...v8.0.0
 [7.0.0]: https://github.com/SP1R4/Qsafe/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...v6.0.0
 [5.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v5.0.0

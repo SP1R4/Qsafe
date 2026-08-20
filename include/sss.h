@@ -40,7 +40,13 @@ typedef enum {
 } sss_status;
 
 /* Splits secret into n share files "<prefix>.share<i>" (i = 1..n), any t of
- * which reconstruct it. */
+ * which reconstruct it.
+ *
+ * SECURITY: `secret` MUST be high-entropy (a random key). Each share header
+ * carries SHA-256(secret) for join-integrity, so a holder of a SINGLE share
+ * (below threshold) can confirm a guessed low-entropy secret offline — which
+ * defeats the sub-threshold secrecy for guessable inputs. Never split a
+ * passphrase; split the random key it protects instead. */
 sss_status sss_split_to_files(const unsigned char *secret, size_t secret_len,
                               unsigned int t, unsigned int n, const char *prefix);
 
