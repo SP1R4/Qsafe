@@ -4,7 +4,145 @@ All notable changes to Qsafe are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [8.0.0] - 2026-08-20
+
+The write format moves to **QSAFE007** (decrypt still reads QSAFE006/005, so
+nothing is stranded; v5/v6/v7 fixtures are pinned in CI). The QSAFE007 layout
+is now **frozen** and specified with test vectors (docs/FORMAT.md §10). This
+release also lands the deniable hidden-volume containers and the vault v2
+passphrase-addressed layer.
+
+### Added
+- **Deniable hidden volumes** (`qsafe vault init|write|read|footprint`,
+  *experimental*): a header-less container of pure CSPRNG randomness holding
+  independently-passphrased slots at caller-chosen `(offset, capacity)`
+  coordinates. A slot's ciphertext is indistinguishable from the surrounding
+  random filler, so a coerced decoy passphrase cannot prove a second, hidden
+  payload exists. Symmetric/passphrase-only and deliberately separate from the
+  QSAFE007 public-key container — ML-KEM ciphertext is not proven
+  indistinguishable from random, so it cannot back a deniable format. Reuses
+  the audited framed-AEAD primitives and scrypt KDF; wrong-passphrase and
+  empty-region reads are byte-for-byte indistinguishable. Full design,
+  format, and threat model in [docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md).
+
+- **Vault v2 — passphrase-addressed volumes** (`vault create|add|ls|extract|rm`,
+  *experimental*, [docs/HIDDEN_VOLUMES_V2.md](docs/HIDDEN_VOLUMES_V2.md)): a
+  passphrase alone locates its **anchor** (a slot at a passphrase-derived
+  offset) whose encrypted **directory** lists that volume's named slots — so v2
+  no longer requires remembering per-slot `(offset, capacity)`. Every mutating
+  command is a **whole-container rewrite**: the entire file is re-randomized and
+  each preserved slot re-sealed under a fresh per-write nonce salt, so a
+  byte-level diff of two container snapshots leaks nothing (closing v1's
+  two-snapshot weakness). A write preserves only the volumes whose passphrase it
+  is given (target + `--keep`); omitting one destroys it (the VeraCrypt
+  outer-clobbers-hidden tension, made explicit). Adds an exported
+  `crypto_hkdf_sha256` (general HKDF with explicit salt/info).
+- **Vault v2 two-factor keyfile** (`--keyfile <path>`): mixes a
+  `SHA-256`-derived keyfile key into both the anchor-location and slot-key
+  derivations, so the passphrase alone can neither find nor open a volume — both
+  factors are independently required. Opt-in and backward-compatible: with no
+  keyfile, every derivation is byte-identical to before. The anchor-offset
+  reduction was also changed to a constant-time Lemire multiply-shift (from a
+  data-dependent `x mod m`).
+- **Vault v2 `passwd`** (`vault passwd <container> --new-passphrase-file`):
+  changes a volume's passphrase in place — reads the volume under the current
+  passphrase and re-seals its slots and relocates its anchor under the new one,
+  in one whole-container rewrite, so the old passphrase opens nothing
+  afterward. Slot content and `--keep` volumes are preserved.
+- **Vault v2 auto-placement**: `vault add`'s `--offset` and `--capacity` are now
+  optional. Capacity defaults to an exact fit for the content; the offset is
+  auto-chosen as the lowest free gap avoiding every slot/anchor the command can
+  see (the target volume's and each `--keep` volume's). Explicit
+  `--offset`/`--capacity` still work for manual placement.
+- **Vault v2 in libqsafe + Python**: `qsafe_vault_create` / `_add` / `_extract`
+  / `_remove` (single-volume, no-keyfile) exposed through the C API and the
+  Python module (`qsafe.vault_create`/`vault_add`/`vault_extract`/`vault_remove`),
+  so volumes are embeddable, not CLI-only.
+- **Vault v2 overflow directories**: a volume can now hold up to 181 slots (was
+  46). When a directory block fills, the block spends one record on a
+  flag-marked pointer to a chained overflow block. No format-version bump — a
+  volume of ≤ 46 slots serializes byte-identically to before, so existing
+  containers, the frozen fixture, and the directory KAT are unaffected.
+- **Vault v2 Argon2id KDF** (`--argon2`): opt-in, derives passphrase keys with
+  Argon2id (RFC 9106) instead of scrypt — memory-hard, GPU/ASIC-resistant, and
+  data-independent (the *id* variant). Mixed into both the anchor location and
+  slot keys; `--scrypt-cost` is reused as the Argon2 memory cost (2^c KiB). The
+  KDF choice is remembered out-of-band (headerless container); the scrypt path
+  is byte-identical, so existing containers/fixtures/KATs are unaffected. Adds
+  an exported `crypto_derive_key_argon2id`, KAT-pinned against the `openssl kdf`
+  CLI. Requires OpenSSL 3.2+.
+- **`secrets` — encrypted credential store** (`secrets set|get|list|rm`): a
+  password-manager-style key-value store layered on a single vault volume,
+  inheriting its deniability and honouring `--keyfile`/`--argon2`/cost. `set`
+  reads the value from stdin (or prompts without echo on a tty) and replaces an
+  existing key in one rewrite; `get` writes the value to stdout. Values move
+  only in memory — a plaintext credential never touches a temp file. Default
+  store `~/.qsafe/secrets.bin`, overridable with `--store`.
+- **Man page + shell completions** now cover every `vault` and `secrets`
+  subcommand and option.
+
+### Assurance
+- Vault known-answer tests (salt derivation, `ciphertext_len`, frame AEAD with
+  coordinate AAD, scrypt), a frozen fixture container, deniability integration
+  tests, a dedicated fuzz harness (`tests/fuzz_vault.c`, `make fuzz-vault`,
+  wired into `fuzz.yml`/`hardening.yml`/OSS-Fuzz), and constant-time coverage
+  of the AES-GCM frame key and vault-cost scrypt (`tests/ct_check.c`).
+- Vault v2 KATs (anchor offset, v2 slot frame key, directory serialization,
+  RFC 5869 HKDF vector), directory parser hostile-input rejections, and
+  integration tests including a direct check that a mutating write re-randomizes
+  ≥99% of the container (the snapshot-diff property) and that `--keep` preserves
+  while omission destroys — all clean under ASan/UBSan.
+
+### Security
+- **scrypt default cost raised 15 → 17** (~32 MiB → ~128 MiB per guess, the
+  OWASP scrypt level). Backward-compatible: the on-disk format is
+  self-describing, so existing keyfiles and vaults still decrypt with their own
+  stored parameters. Covers keyfile-at-rest and the vault default KDF;
+  public-key document encryption already uses Argon2id (64 MiB / t=3).
+- **Shamir `split-key` low-entropy caveat** documented (`include/sss.h`,
+  `THREAT_MODEL.md`): GF(256) recovery is not constant-time and acts as a
+  confirmation oracle for low-entropy inputs — only split high-entropy secrets.
+
+### Added (QSAFE007 format layer)
+- **Embedded sender authentication** (`encrypt --sign-with <sk>`): an
+  ML-DSA-87 signature over (header ‖ metadata ‖ contents) travels *inside* the
+  encrypted payload and is verified automatically on decrypt/verify — the
+  signer's identity stays hidden from anyone who cannot decrypt. `--signer
+  <pk>` pins the expected signer; an invalid signature or the wrong signer
+  fails closed and removes any output.
+- **Size-hiding padding** (`encrypt --pad`): random padding to the file's
+  [Padmé](https://petsymposium.org/2019/files/papers/issue4/popets-2019-0056.pdf)
+  bucket, so the ciphertext length leaks only O(log log n) bits of the true
+  size (≤ ~12% overhead). Stripped transparently on decrypt.
+- **Shamir key recovery** (`split-key --threshold t --shares n` /
+  `join-key <shares...>`): information-theoretic secret sharing of the secret
+  key over GF(256). Shares carry a random set-id (foreign shares can't be
+  combined) and a digest (a corrupt share fails closed); `join-key` re-wraps
+  under a freshly confirmed passphrase.
+- **`age-plugin-qsafe`** — post-quantum recipients for the whole age
+  ecosystem: implements the C2SP age plugin protocol, so `age -r
+  age1qsafe1...` encrypts to a hybrid X25519 + ML-KEM-1024 identity from any
+  age client (validated against age 1.3.1, including mixed native+plugin
+  recipient files). `--keygen` / `-y` follow age-keygen conventions.
+- **Windows keychain backend**: `--keychain` now works on Windows via DPAPI
+  (user-scoped `CryptProtectData`, sealed blob under `%APPDATA%\qsafe\`).
+- **PyPI packaging**: `pip install qsafe` — per-platform wheels with libqsafe
+  bundled (cibuildwheel; published on tags via PyPI trusted publishing).
+- **Known-answer vectors + frozen fixtures**: independently generated KATs for
+  the hybrid KEK, frame AEAD, Padmé buckets, and the age-plugin label; frozen
+  plain/signed/padded QSAFE007 fixtures pin the reader.
+- **Supply-chain hardening**: SLSA build provenance on releases
+  (`gh attestation verify`), a reproducible-build CI gate (double build must
+  be byte-identical), a ctgrind-style constant-time valgrind harness
+  (`make ct`, advisory CI job), and OSS-Fuzz project files (`oss-fuzz/`)
+  ready for enrollment.
+
+### Changed
+- `encrypt` writes QSAFE007 (288-byte metadata block carrying content length,
+  padding length, and feature flags). Readers up to 7.x cannot read new
+  files; decrypt reads v7/v6/v5.
+- Object files now depend on the public headers in the Makefile, so header
+  changes can no longer produce stale-ABI builds.
 
 ## [7.0.0] - 2026-06-26
 
@@ -102,7 +240,7 @@ files with a 4.x build first).
 - Switched to ML-KEM-1024; scrypt-wrapped secret keys; streaming decryption;
   CI and expanded tests.
 
-[Unreleased]: https://github.com/SP1R4/Qsafe/compare/v7.0.0...HEAD
+[8.0.0]: https://github.com/SP1R4/Qsafe/compare/v7.0.0...v8.0.0
 [7.0.0]: https://github.com/SP1R4/Qsafe/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/SP1R4/Qsafe/compare/v5.0.0...v6.0.0
 [5.0.0]: https://github.com/SP1R4/Qsafe/releases/tag/v5.0.0

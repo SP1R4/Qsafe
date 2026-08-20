@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qsafe"
+version = "8.0.0"
+description = "Hybrid post-quantum file encryption (X25519 + ML-KEM-1024 + AES-256-GCM) — Python bindings for libqsafe"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "SP1R4", email = "sp1r4.work@gmail.com" }]
+keywords = ["post-quantum", "encryption", "ml-kem", "kyber", "x25519", "cryptography"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Homepage = "https://github.com/SP1R4/Qsafe"
+Changelog = "https://github.com/SP1R4/Qsafe/blob/master/CHANGELOG.md"
+
+[tool.setuptools]
+packages = ["qsafe"]
+package-dir = { qsafe = "python/qsafe" }
+
+# Wheels are built per-platform by .github/workflows/wheels.yml (cibuildwheel);
+# setup.py compiles libqsafe via `make lib` and bundles it into the package.

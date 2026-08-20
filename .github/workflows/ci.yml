@@ -4,51 +4,29 @@ on:
   push:
   pull_request:
 
+# qsafe-pq builds against OpenSSL 3.2+ (Argon2 EVP_KDF) and liboqs. The GitHub
+# Ubuntu images ship OpenSSL 3.0 and no liboqs, so the setup-pq-deps composite
+# action builds both from source into ~/pqdeps and caches them. We point the
+# Makefile at that prefix via EXTRA_CFLAGS/EXTRA_LDFLAGS, and embed an rpath so
+# the produced binaries load our OpenSSL 3.2 at runtime rather than the system
+# 3.0 (both share the libssl.so.3 SONAME). Ubuntu bills at 1x vs macOS 10x.
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          # Drop preconfigured third-party apt sources (e.g. packages.microsoft.com)
-          # that can return 403 and break `apt-get update`; we only need the
-          # Ubuntu archives.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
-                     /etc/apt/sources.list.d/azure-cli.list \
-                     /etc/apt/sources.list.d/google-chrome.list 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev cmake ninja-build
-
-      - name: Cache liboqs
-        id: cache-liboqs
-        uses: actions/cache@v4
-        with:
-          path: liboqs-install
-          key: liboqs-0.12.0-${{ runner.os }}
-
-      - name: Build liboqs
-        if: steps.cache-liboqs.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
-          cmake -S liboqs -B liboqs/build -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DOQS_BUILD_ONLY_LIB=ON \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"
-          cmake --build liboqs/build
-          cmake --install liboqs/build
-
-      - name: Install liboqs
-        run: |
-          sudo cp -r liboqs-install/include/* /usr/local/include/
-          sudo cp -r liboqs-install/lib/* /usr/local/lib/
-          sudo ldconfig
+      - name: Setup PQ deps (OpenSSL 3.2+ / liboqs)
+        id: pq
+        uses: ./.github/actions/setup-pq-deps
 
       - name: Build (warnings are errors)
-        run: make EXTRA_CFLAGS="-Werror"
+        run: |
+          make EXTRA_CFLAGS="-I${{ steps.pq.outputs.prefix }}/include -Werror" \
+               EXTRA_LDFLAGS="-L${{ steps.pq.outputs.prefix }}/lib -Wl,-rpath,${{ steps.pq.outputs.prefix }}/lib"
 
-      - name: Run tests
-        run: make test
+      - name: Unit tests + ratchet / PQXDH / PQ-ratchet / soak suite
+        run: |
+          make test EXTRA_CFLAGS="-I${{ steps.pq.outputs.prefix }}/include" \
+                    EXTRA_LDFLAGS="-L${{ steps.pq.outputs.prefix }}/lib -Wl,-rpath,${{ steps.pq.outputs.prefix }}/lib"

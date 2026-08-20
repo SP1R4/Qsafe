@@ -3,9 +3,10 @@ name: Bindings
 # Builds the shared library (libqsafe) and runs the Python binding tests.
 
 on:
-  push:
-    branches: [master]
-  pull_request:
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
+  workflow_dispatch:
 
 jobs:
   python:

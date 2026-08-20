@@ -1,0 +1,95 @@
+name: Wheels
+
+# Builds PyPI wheels for the Python bindings (libqsafe bundled per platform)
+# with cibuildwheel. Publishing runs only on version tags, via PyPI "trusted
+# publishing" (configure the GitHub environment on pypi.org; no token secret).
+#
+# Wheels are a RELEASE artifact, not a per-PR gate: bundling OpenSSL 3 + liboqs
+# into a portable wheel is platform-specific (manylinux needs OpenSSL 3 built
+# from source; macOS needs MACOSX_DEPLOYMENT_TARGET aligned to the Homebrew
+# libs). Validate with `workflow_dispatch` before cutting the first tagged
+# release rather than on every PR. See wheels.yml TODOs below.
+
+on:
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          # The bindings are ctypes-only and tagged py3-none-<plat>; one
+          # CPython per platform is enough to produce the wheel.
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-musllinux* *_i686"
+          # manylinux (CentOS-based) ships OpenSSL 1.0.2, but libqsafe needs
+          # OpenSSL 3 and liboqs needs >= 1.1.1 — so build OpenSSL 3 from source
+          # first, then liboqs against it (OQS_USE_OPENSSL=OFF keeps liboqs's own
+          # build self-contained), both into /usr/local.  [NEEDS VALIDATION via
+          # workflow_dispatch before the first tagged release.]
+          CIBW_BEFORE_ALL_LINUX: >
+            yum install -y perl-core cmake ninja-build git ||
+            dnf install -y perl-core cmake ninja-build git;
+            git clone --depth 1 --branch openssl-3.3.1 https://github.com/openssl/openssl.git /tmp/openssl &&
+            (cd /tmp/openssl && ./Configure --prefix=/usr/local --libdir=lib no-shared no-tests &&
+             make -j"$(nproc)" && make install_dev) &&
+            git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs &&
+            cmake -S /tmp/liboqs -B /tmp/liboqs/build -GNinja
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON -DOQS_USE_OPENSSL=OFF
+            -DCMAKE_INSTALL_PREFIX=/usr/local &&
+            cmake --build /tmp/liboqs/build &&
+            cmake --install /tmp/liboqs/build &&
+            ldconfig
+          CIBW_BEFORE_ALL_MACOS: brew install openssl@3 liboqs
+          # macOS: align the wheel's minimum-OS tag with the Homebrew libs it
+          # bundles (they target the runner's OS), so delocate accepts them.
+          CIBW_ENVIRONMENT_MACOS: >
+            MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0
+          # Bundle libqsafe's own dependencies (liboqs, libcrypto) into the
+          # wheel so it is self-contained.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel repair -w {dest_dir} {wheel}
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
+            delocate-wheel -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: >
+            env QSAFE_TEST_INSTALLED=1 python {project}/python/test_qsafe.py
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: build-wheels
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

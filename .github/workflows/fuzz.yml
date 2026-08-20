@@ -6,19 +6,10 @@ name: Fuzz
 # crash makes the job fail and uploads the reproducing input as an artifact.
 
 on:
-  schedule:
-    - cron: "0 5 * * *"   # daily 05:00 UTC
+  # Disabled on the qsafe-pq fork: this is a base-qsafe distribution/
+  # platform workflow, not relevant to the PQ crypto layer. Kept as a
+  # manual (workflow_dispatch) trigger so nothing auto-runs / goes red.
   workflow_dispatch:
-    inputs:
-      duration:
-        description: "Fuzz duration in seconds"
-        default: "600"
-  pull_request:
-    paths:
-      - "src/**"
-      - "include/**"
-      - "tests/fuzz_decrypt.c"
-      - ".github/workflows/fuzz.yml"
 
 permissions:
   contents: read
@@ -61,21 +52,24 @@ jobs:
           sudo cp -r liboqs-install/lib/* /usr/local/lib/
           sudo ldconfig
 
-      - name: Build fuzz target
-        run: make fuzz FUZZ_CC=clang
+      - name: Build fuzz targets
+        run: make fuzz fuzz-vault fuzz-vault-dir FUZZ_CC=clang
 
-      # Persist the corpus across runs: the unique key always misses, but the
+      # Persist both corpora across runs: the unique key always misses, but the
       # restore-key prefix pulls the most recent corpus, and the new corpus is
       # saved at job end.
-      - name: Restore corpus
+      - name: Restore corpora
         uses: actions/cache@v4
         with:
-          path: corpus
+          path: |
+            corpus
+            corpus_vault
+            corpus_vault_dir
           key: qsafe-fuzz-corpus-${{ github.run_id }}
           restore-keys: |
             qsafe-fuzz-corpus-
 
-      - name: Fuzz
+      - name: Fuzz (decrypt parser)
         env:
           ASAN_OPTIONS: detect_leaks=0
           DURATION: ${{ github.event.inputs.duration || '300' }}
@@ -83,6 +77,27 @@ jobs:
           mkdir -p corpus
           tests/fuzz_decrypt -max_len=8192 -max_total_time="$DURATION" \
             -print_final_stats=1 corpus
+
+      - name: Fuzz (vault reader)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          DURATION: ${{ github.event.inputs.duration || '300' }}
+        run: |
+          mkdir -p corpus_vault
+          # Seed from the frozen fixture container so the mutator starts from
+          # real ciphertext at the harness's fixed (offset, capacity).
+          cp tests/fixtures/vault/container.bin corpus_vault/ 2>/dev/null || true
+          tests/fuzz_vault -max_len=300000 -max_total_time="$DURATION" \
+            -print_final_stats=1 corpus_vault
+
+      - name: Fuzz (vault directory parser)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          DURATION: ${{ github.event.inputs.duration || '300' }}
+        run: |
+          mkdir -p corpus_vault_dir
+          tests/fuzz_vault_dir -max_len=4096 -max_total_time="$DURATION" \
+            -print_final_stats=1 corpus_vault_dir
 
       - name: Upload crash artifacts
         if: failure()

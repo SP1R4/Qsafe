@@ -11,7 +11,15 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# For in-repo runs, prefer the source package. Set QSAFE_TEST_INSTALLED=1 to
+# test an installed wheel instead (used by the wheels CI) — that also has to
+# undo Python's automatic script-directory sys.path entry, which would shadow
+# the installed package with the source one.
+_here = os.path.dirname(os.path.abspath(__file__))
+if os.environ.get("QSAFE_TEST_INSTALLED"):
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != _here]
+else:
+    sys.path.insert(0, _here)
 import qsafe  # noqa: E402
 
 
@@ -85,6 +93,43 @@ class TestQsafeBindings(unittest.TestCase):
             f.write(b"tampered")
         with self.assertRaises(qsafe.QsafeError):
             qsafe.verify_signature(doc, sig, spk)
+
+    # scrypt cost 2^14 keeps the vault tests fast (the anchor scrypt would
+    # otherwise run at the vault default of 2^20).
+    _VCOST = 14
+
+    def test_vault_roundtrip(self):
+        cont = os.path.join(self.d, "vault.bin")
+        loot = os.path.join(self.d, "loot.txt")
+        out = os.path.join(self.d, "loot.out")
+        with open(loot, "wb") as f:
+            f.write(b"deniable payload via the python API")
+        qsafe.vault_create(cont, "vpass", 1_500_000, self._VCOST)
+        qsafe.vault_add(cont, "vpass", "loot", loot, self._VCOST)
+        qsafe.vault_extract(cont, "vpass", "loot", out, self._VCOST)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"deniable payload via the python API")
+
+    def test_vault_wrong_passphrase_raises(self):
+        cont = os.path.join(self.d, "vault2.bin")
+        loot = os.path.join(self.d, "l.txt")
+        with open(loot, "wb") as f:
+            f.write(b"x")
+        qsafe.vault_create(cont, "right", 1_500_000, self._VCOST)
+        qsafe.vault_add(cont, "right", "l", loot, self._VCOST)
+        with self.assertRaises(qsafe.QsafeError):
+            qsafe.vault_extract(cont, "wrong", "l", loot + ".x", self._VCOST)
+
+    def test_vault_remove(self):
+        cont = os.path.join(self.d, "vault3.bin")
+        loot = os.path.join(self.d, "r.txt")
+        with open(loot, "wb") as f:
+            f.write(b"remove me")
+        qsafe.vault_create(cont, "vp", 1_500_000, self._VCOST)
+        qsafe.vault_add(cont, "vp", "r", loot, self._VCOST)
+        qsafe.vault_remove(cont, "vp", "r", self._VCOST)
+        with self.assertRaises(qsafe.QsafeError):
+            qsafe.vault_extract(cont, "vp", "r", loot + ".y", self._VCOST)
 
 
 if __name__ == "__main__":

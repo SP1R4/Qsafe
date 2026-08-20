@@ -36,6 +36,16 @@ static inline void qsafe_set_binary_stdio(void) {
 #endif
 }
 
+/* Returns 1 if stdin is an interactive terminal (so a value can be prompted
+ * for without echo) rather than a pipe/file. */
+static inline int qsafe_isatty_stdin(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin));
+#else
+    return isatty(fileno(stdin));
+#endif
+}
+
 /* Create a directory with default permissions. Returns 0 on success. */
 static inline int qsafe_mkdir(const char *path) {
 #ifdef _WIN32
@@ -70,6 +80,24 @@ static inline void qsafe_restore_meta(const char *path, unsigned mode, unsigned 
     t.actime = (time_t)mtime;
     t.modtime = (time_t)mtime;
     utime(path, &t);
+#endif
+}
+
+/* 64-bit-offset seek/tell, since a hidden-volume container (src/vault.c) can
+ * exceed 2 GiB and plain fseek/ftell take a `long` (32 bits on Windows). */
+static inline int qsafe_fseek64(FILE *f, long long off, int whence) {
+#ifdef _WIN32
+    return _fseeki64(f, off, whence);
+#else
+    return fseeko(f, (off_t)off, whence);
+#endif
+}
+
+static inline long long qsafe_ftell64(FILE *f) {
+#ifdef _WIN32
+    return _ftelli64(f);
+#else
+    return (long long)ftello(f);
 #endif
 }
 

@@ -1,4 +1,4 @@
-.TH QSAFE 1 "2026" "Qsafe 6.0.0" "User Commands"
+.TH QSAFE 1 "2026" "Qsafe 8.0.0" "User Commands"
 .SH NAME
 qsafe \- hybrid post-quantum file encryption and signing
 .SH SYNOPSIS
@@ -60,6 +60,76 @@ Create a detached signature for a file (default \fIinput\fR.sig).
 .TP
 .B verify-sig " " \fIinput\fR " " [\fIsignature\fR]
 Verify a detached signature against a file.
+.TP
+.B keys " " <list|path|import|remove>
+Manage the keyring under ~/.qsafe (named identities and recipients).
+.TP
+.B split-key " " [\fIprefix\fR]
+Split the secret key into \fB\-\-shares\fR Shamir shares over GF(256), any
+\fB\-\-threshold\fR of which reconstruct it. Each share file is unencrypted
+key material \(em store them separately.
+.TP
+.B join-key " " \fIshare\fR " " \fIshare\fR " " [\fIshare\fR...]
+Reconstruct a secret key from shares and re\-wrap it under a freshly
+confirmed passphrase.
+.TP
+.B vault " " <subcommand>
+Deniable hidden\-volume containers (experimental). A container is a file of
+pure random bytes with no header; encrypted slots inside it are
+indistinguishable from the surrounding randomness, so a coerced passphrase
+cannot prove a second, hidden payload exists. See
+.BR HIDDEN_VOLUMES.md " and " HIDDEN_VOLUMES_V2.md .
+Subcommands:
+.RS
+.TP
+.B init " " \fIpath\fR " " \fB\-\-size\fR " " \fIn\fR
+Create a container of \fIn\fR random bytes (low\-level, coordinate\-addressed).
+.TP
+.B write/read " " \fIpath\fR " " \fB\-\-offset\fR " " \fIn\fR " " \fB\-\-capacity\fR " " \fIn\fR " " \fIfile\fR
+Seal/recover a slot at an explicit (offset, capacity) you must remember.
+.TP
+.B footprint " " \fB\-\-capacity\fR " " \fIn\fR
+Print the on\-disk byte size a slot of that capacity occupies.
+.TP
+.B create " " \fIpath\fR " " \fB\-\-size\fR " " \fIn\fR
+Create a container holding one passphrase\-addressed volume (v2). With
+\fB\-\-keep\fR and no \fB\-\-size\fR, add a volume to an existing container.
+.TP
+.B add " " \fIpath\fR " " \fIfile\fR " " \fB\-\-name\fR " " \fIs\fR
+Add a file as a named slot in a volume. \fB\-\-offset\fR/\fB\-\-capacity\fR are
+optional; omitted, the slot is auto\-placed at an exact\-fit capacity.
+.TP
+.B ls " " \fIpath\fR
+List the opened volume's slots.
+.TP
+.B extract " " \fIpath\fR " " \fB\-\-name\fR " " \fIs\fR " " \fIoutput\fR
+Recover a named slot to \fIoutput\fR.
+.TP
+.B rm " " \fIpath\fR " " \fB\-\-name\fR " " \fIs\fR
+Remove a named slot.
+.TP
+.B passwd " " \fIpath\fR " " \fB\-\-new\-passphrase\-file\fR " " \fIp\fR
+Change a volume's passphrase in place.
+.RE
+.IP
+Every mutating v2 command rewrites the whole container (each byte
+re\-randomized), so a byte\-level diff of two snapshots leaks nothing. A write
+preserves only the volumes whose passphrase it is given (the target plus any
+\fB\-\-keep\fR); omitting a volume's passphrase destroys it.
+.TP
+.B secrets " " <set|get|list|rm> " " [\fIkey\fR]
+An encrypted key-value credential store layered on a vault volume (a secret is
+a named slot whose content is the value). \fBset\fR reads the value from stdin
+(or prompts without echo on a terminal) and overwrites an existing key;
+\fBget\fR writes the value to stdout; \fBlist\fR prints the key names; \fBrm\fR
+deletes one. Values move only in memory, never a temp file. The default store
+is ~/.qsafe/secrets.bin (\fB\-\-store\fR overrides). Honours \fB\-\-keyfile\fR,
+\fB\-\-argon2\fR and \fB\-\-scrypt\-cost\fR.
+.TP
+.B age-keygen / age-encrypt / age-decrypt
+Interoperate with the classical age (X25519) v1 file format. For
+\fIpost\-quantum\fR age recipients, see
+.BR age-plugin-qsafe .
 .SH OPTIONS
 .TP
 .BI \-\-key\-file " path"
@@ -80,11 +150,76 @@ Read the passphrase from the first line of a file.
 .B \-\-check
 For decrypt/verify: authenticate only, write no plaintext.
 .TP
+.BI \-\-sign\-with " sk"
+For encrypt: embed an ML\-DSA\-87 sender signature inside the encrypted
+payload (needs \fIsk\fR and \fIsk\fR.pub, from \fBsign-keygen\fR). Decrypt
+verifies it automatically and reports the signer's fingerprint; verification
+failure removes any output.
+.TP
+.BI \-\-signer " pk"
+For decrypt/verify: additionally require the embedded signer to be exactly
+this public key.
+.TP
+.B \-\-pad
+For encrypt: append random padding to the file's Padm\('e bucket, so the
+ciphertext length reveals only a coarse size class. Requires a regular file
+input.
+.TP
+.BI \-\-threshold " t"
+For split-key: shares needed to reconstruct (2\-16).
+.TP
+.BI \-\-shares " n"
+For split-key: total shares to create (t\-255).
+.TP
+.B \-\-keychain
+Store (key\-creating commands) or retrieve the wrapping passphrase in the OS
+keychain \(em macOS Keychain or Windows DPAPI.
+.TP
+.BI \-\-identity " name"
+Use (or, for keygen, create) a keyring identity under ~/.qsafe.
+.TP
 .B \-\-armor
 Encrypt to ASCII base64 text; decrypt from base64 text.
 .TP
 .BI \-\-scrypt\-cost " n"
-scrypt cost as log2(N), 14\-22 (default 15), used by keygen/rekey.
+scrypt cost as log2(N), 14\-22 (default 15), used by keygen/rekey and vault
+(vault's default cost is higher, since a passphrase is the only protection).
+.TP
+.BI \-\-size " bytes"
+For vault init/create: the container's total size.
+.TP
+.BI \-\-offset " bytes"
+For vault write/read: a slot's start offset. Optional for vault add
+(auto\-placed if omitted).
+.TP
+.BI \-\-capacity " bytes"
+For vault write/read/footprint: a slot's plaintext capacity. Optional for
+vault add (defaults to an exact fit for the content).
+.TP
+.BI \-\-name " s"
+For vault add/extract/rm: the slot's name within a volume.
+.TP
+.BI \-\-keep " ppfile"
+For vault create/add/rm/passwd: also preserve the volume whose passphrase is in
+\fIppfile\fR across the whole\-container rewrite. Repeatable. A volume not named
+is destroyed by the rewrite.
+.TP
+.BI \-\-keyfile " path"
+For vault v2: require this file as a second factor. Its hash is mixed into both
+the anchor location and the slot keys, so the passphrase alone can neither find
+nor open a volume.
+.TP
+.B \-\-argon2
+For vault v2: derive passphrase keys with Argon2id (RFC 9106) instead of scrypt.
+\fB\-\-scrypt\-cost\fR is reused as the Argon2 memory cost (2^c KiB). The choice
+is remembered out of band \(em an Argon2 container opens only with
+\fB\-\-argon2\fR. Requires OpenSSL 3.2+.
+.TP
+.BI \-\-store " path"
+For secrets: the store file (default ~/.qsafe/secrets.bin).
+.TP
+.BI \-\-new\-passphrase\-file " path"
+For vault passwd: file holding the replacement passphrase.
 .TP
 .B \-\-verbose
 Enable verbose output.
@@ -128,6 +263,23 @@ Sign and verify a release artifact:
 qsafe sign-keygen
 qsafe sign release.tar.gz
 qsafe verify-sig release.tar.gz release.tar.gz.sig
+.fi
+.RE
+.PP
+Encrypt with an embedded sender signature and size hiding:
+.PP
+.RS
+.nf
+qsafe encrypt --sign-with sign_key.bin --pad -r alice.pub report.pdf
+.fi
+.RE
+.PP
+Split the secret key 2\-of\-3 and later recover it:
+.PP
+.RS
+.nf
+qsafe split-key --threshold 2 --shares 3 backup
+qsafe join-key backup.share1 backup.share3
 .fi
 .RE
 .SH EXIT STATUS

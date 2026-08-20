@@ -61,6 +61,32 @@ qsafe_status qsafe_sign(const char *in_path, const char *sig_path,
 qsafe_status qsafe_verify_signature(const char *in_path, const char *sig_path,
                                     const char *sign_public_path);
 
+/* --- vault v2: deniable passphrase-addressed volumes (experimental) ---
+ *
+ * A thin embedding surface over the `vault create/add/extract/rm` commands (see
+ * docs/HIDDEN_VOLUMES_V2.md). Each call is a whole-container rewrite for the
+ * mutating operations. `scrypt_log_n` sets the KDF cost as log2(N) in [14, 22];
+ * pass 0 for the (higher) vault default. These wrap the single-volume,
+ * no-keyfile case — multi-volume `--keep` and `--keyfile` are CLI-only for now.
+ * Progress text may be written to stdout/stderr. */
+
+/* Create a container of `size` bytes holding one empty volume under passphrase
+ * (overwrites any existing file at container_path). */
+qsafe_status qsafe_vault_create(const char *container_path, const char *passphrase,
+                                unsigned long long size, unsigned scrypt_log_n);
+
+/* Add in_path as an auto-placed, exact-fit named slot in the volume. */
+qsafe_status qsafe_vault_add(const char *container_path, const char *passphrase,
+                             const char *name, const char *in_path, unsigned scrypt_log_n);
+
+/* Recover a named slot to out_path. */
+qsafe_status qsafe_vault_extract(const char *container_path, const char *passphrase,
+                                 const char *name, const char *out_path, unsigned scrypt_log_n);
+
+/* Remove a named slot. */
+qsafe_status qsafe_vault_remove(const char *container_path, const char *passphrase,
+                                const char *name, unsigned scrypt_log_n);
+
 #ifdef __cplusplus
 }
 #endif

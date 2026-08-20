@@ -3,7 +3,10 @@
 crypto
 crypto-v2
 qsafe
+age-plugin-qsafe
+age-plugin-qsafe.exe
 tests/test_crypto
+tests/ct_check
 tests/fuzz_decrypt
 *.dSYM/
 corpus/
@@ -20,6 +23,10 @@ secret_key.bin
 *.key
 *.pem
 
+# ...but the checked-in test fixtures (frozen containers that pin on-disk
+# format compatibility) are not secrets and must be tracked.
+!tests/fixtures/**/*.bin
+
 # Claude Code
 .claude/
 
@@ -31,3 +38,14 @@ __pycache__/
 
 # keyring test scratch
 qsafe_keyring_test_*/
+tests/test_ratchet
+tests/test_ratchet_kat
+tests/test_pqxdh
+tests/test_pqratchet
+tests/test_ratchet_soak
+tests/test_ratchet_he
+
+tests/test_merkle
+tests/test_translog
+tests/test_group
+tests/test_treekem

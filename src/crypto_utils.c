@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
@@ -25,6 +26,10 @@
 
 /* Label for the hybrid key-encryption key derived from (X25519 DH || ML-KEM ss). */
 #define HKDF_HYBRID_LABEL "qsafe-v5-hybrid-kek"
+
+/* Signature algorithm used both for detached signatures and the v7 embedded
+ * signed-sender trailer. */
+#define QSAFE_SIG_ALG OQS_SIG_alg_ml_dsa_87
 
 void crypto_handle_errors(void) {
     ERR_print_errors_fp(stderr);
@@ -140,6 +145,72 @@ crypto_error_t crypto_derive_aes_key(const unsigned char *shared_secret, size_t 
     return ret;
 }
 
+crypto_error_t crypto_hkdf_sha256(const unsigned char *ikm, size_t ikm_len,
+                                  const unsigned char *salt, size_t salt_len,
+                                  const unsigned char *info, size_t info_len,
+                                  unsigned char *out, size_t out_len) {
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    if (!kdf) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!kctx) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+
+    /* Up to: digest, key, salt, info, end. Salt/info are omitted when empty,
+     * so HKDF falls back to RFC 5869 defaults (all-zero salt, empty info) —
+     * matching the internal fixed-info derivations above. */
+    OSSL_PARAM params[5];
+    int i = 0;
+    params[i++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, "SHA256", 0);
+    params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)ikm, ikm_len);
+    if (salt && salt_len > 0)
+        params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, salt_len);
+    if (info && info_len > 0)
+        params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO, (void *)info, info_len);
+    params[i] = OSSL_PARAM_construct_end();
+
+    crypto_error_t ret = CRYPTO_SUCCESS;
+    if (EVP_KDF_derive(kctx, out, out_len, params) != 1) { crypto_handle_errors(); ret = CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX_free(kctx);
+    return ret;
+}
+
+crypto_error_t crypto_hmac_sha256(const unsigned char *key, size_t key_len,
+                                  const unsigned char *data, size_t data_len,
+                                  unsigned char out[32]) {
+    if (!key || !data || !out) return CRYPTO_ERR_INVALID_INPUT;
+    unsigned int mac_len = 0;
+    unsigned char *r = HMAC(EVP_sha256(), key, (int)key_len, data, data_len, out, &mac_len);
+    if (!r || mac_len != 32) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    return CRYPTO_SUCCESS;
+}
+
+crypto_error_t crypto_derive_key_argon2id(const char *passphrase, const unsigned char *salt,
+                                          uint32_t m_kib, uint32_t t_iters, uint32_t p_lanes,
+                                          unsigned char *out_key) {
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    if (!kdf) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!kctx) { crypto_handle_errors(); return CRYPTO_ERR_CRYPTO; }
+
+    /* threads only affects speed, not output; pin it to 1 for a deterministic,
+     * lane-count-defined result. Argon2 v1.3 (0x13) is OpenSSL's default. */
+    uint32_t threads = 1;
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)passphrase, strlen(passphrase)),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, KDF_SALT_SIZE),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &m_kib),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &t_iters),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &p_lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_end()
+    };
+    crypto_error_t ret = CRYPTO_SUCCESS;
+    if (EVP_KDF_derive(kctx, out_key, AES_KEY_SIZE, params) != 1) { crypto_handle_errors(); ret = CRYPTO_ERR_CRYPTO; }
+    EVP_KDF_CTX_free(kctx);
+    return ret;
+}
+
 crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const unsigned char *salt,
                                                  uint64_t n, uint32_t r, uint32_t p, unsigned char *out_key) {
     EVP_KDF *kdf = EVP_KDF_fetch(NULL, "SCRYPT", NULL);
@@ -155,7 +226,7 @@ crypto_error_t crypto_derive_key_from_passphrase(const char *passphrase, const u
         return CRYPTO_ERR_CRYPTO;
     }
 
-    /* The caller chooses N/r/p (default N=2^15, r=8, p=1 -> ~32 MiB per guess).
+    /* The caller chooses N/r/p (default N=2^17, r=8, p=1 -> ~128 MiB per guess).
      * maxmem scales with the request so a higher N is permitted but a hostile
      * key file cannot ask OpenSSL for an unbounded allocation. */
     uint64_t maxmem = 128ULL * n * r * 2; /* ~2x scrypt's working-set bound */
@@ -453,6 +524,7 @@ crypto_error_t crypto_save_public_key(const char *filename, const unsigned char 
 unsigned char *crypto_load_public_key(const char *filename, size_t expected_length, const crypto_config_t *config) {
     (void)config;
 
+    if (!filename) return NULL;   /* public API: never fopen(NULL) */
     FILE *file = fopen(filename, "rb");
     if (!file) {
         perror("Error opening public key file");
@@ -501,13 +573,14 @@ crypto_error_t crypto_inspect_file(const char *filename, OQS_KEM *kem, const cry
     printf("File: %s\n", filename);
     printf("Size: %zu bytes\n", file_size);
 
-    /* Encrypted QSAFE container (v6 = framed, v5 = single-AEAD)? */
+    /* Encrypted QSAFE container (v7/v6 = framed, v5 = single-AEAD)? */
+    int v7 = (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER_V7, VERSION_HEADER_SIZE) == 0);
     int v6 = (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER_V6, VERSION_HEADER_SIZE) == 0);
     int v5 = (got >= VERSION_HEADER_SIZE && memcmp(prefix, VERSION_HEADER, VERSION_HEADER_SIZE) == 0);
-    if (v5 || v6) {
+    if (v5 || v6 || v7) {
         printf("Type: encrypted file (%.*s)\n", VERSION_HEADER_SIZE, (const char *)prefix);
         printf("KEM:  hybrid X25519 + %s\n", OQS_KEM_alg_ml_kem_1024);
-        if (v6) {
+        if (v6 || v7) {
             printf("AEAD: AES-256-GCM, framed (%d-byte frames)\n", QSAFE_FRAME_SIZE);
         } else {
             printf("AEAD: AES-256-GCM (nonce %d, tag %d bytes)\n", AES_GCM_NONCE_SIZE, AES_GCM_TAG_SIZE);
@@ -712,6 +785,19 @@ static int x25519_dh(const unsigned char sec[X25519_KEY_SIZE],
     return ok;
 }
 
+/* Public wrappers over the static X25519 helpers, exposed for the ratchet module
+ * (include/ratchet.h), whose PQXDH handshake and DH ratchet need raw X25519
+ * keypairs and DH separately from the packaged hybrid wrap. */
+crypto_error_t crypto_x25519_keypair(unsigned char sec[X25519_KEY_SIZE], unsigned char pub[X25519_KEY_SIZE]) {
+    return x25519_keypair(sec, pub) == 1 ? CRYPTO_SUCCESS : CRYPTO_ERR_CRYPTO;
+}
+
+crypto_error_t crypto_x25519_dh(const unsigned char sec[X25519_KEY_SIZE],
+                                const unsigned char peer_pub[X25519_KEY_SIZE],
+                                unsigned char out[X25519_KEY_SIZE]) {
+    return x25519_dh(sec, peer_pub, out) == 1 ? CRYPTO_SUCCESS : CRYPTO_ERR_CRYPTO;
+}
+
 /* AES-256-GCM seal/open of a small buffer (used to wrap the CEK per recipient).
  * Returns 1 on success; gcm_open returns 0 if the tag does not verify. */
 static int gcm_seal(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
@@ -752,8 +838,10 @@ static int gcm_open(const unsigned char key[AES_KEY_SIZE], const unsigned char n
  * big-endian counter, and a final byte that is 1 on the last frame else 0.
  * The content key is random per file, so this deterministic per-frame nonce is
  * unique under that key; the counter binds frame order and the final flag makes
- * truncation (a missing final frame) detectable. */
-static void frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]) {
+ * truncation (a missing final frame) detectable. Exposed (non-static) so other
+ * modules built on the same framed-AEAD convention (e.g. src/vault.c) don't
+ * reimplement it. */
+void crypto_frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_NONCE_SIZE]) {
     memset(nonce, 0, AES_GCM_NONCE_SIZE);
     for (int i = 0; i < 8; i++) {
         nonce[3 + i] = (unsigned char)((counter >> (8 * (7 - i))) & 0xff);
@@ -762,8 +850,9 @@ static void frame_nonce(uint64_t counter, int last, unsigned char nonce[AES_GCM_
 }
 
 /* AES-256-GCM seal/open of one frame, with optional additional authenticated
- * data. ct must have room for ptlen bytes; tag is 16 bytes. */
-static int gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+ * data. ct must have room for ptlen bytes; tag is 16 bytes. Exposed for reuse
+ * (see crypto_frame_nonce above). */
+int crypto_gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
                         const unsigned char *aad, size_t aadlen,
                         const unsigned char *pt, int ptlen, unsigned char *ct, unsigned char tag[AES_GCM_TAG_SIZE]) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -781,7 +870,7 @@ static int gcm_seal_aad(const unsigned char key[AES_KEY_SIZE], const unsigned ch
     return ok;
 }
 
-static int gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
+int crypto_gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned char nonce[AES_GCM_NONCE_SIZE],
                         const unsigned char *aad, size_t aadlen,
                         const unsigned char *ct, int ctlen, const unsigned char tag[AES_GCM_TAG_SIZE], unsigned char *pt) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -797,6 +886,19 @@ static int gcm_open_aad(const unsigned char key[AES_KEY_SIZE], const unsigned ch
     }
     EVP_CIPHER_CTX_free(ctx);
     return ok;
+}
+
+/* Padmé padded size (from the PURBs paper): round L up so that only
+ * O(log log L) mantissa bits survive, bounding the leak about the true length
+ * while keeping overhead under ~12%. Returns the padded length (>= L). */
+uint64_t crypto_padme_size(uint64_t L) {
+    if (L < 2) return L;
+    int E = 63 - __builtin_clzll(L);                 /* floor(log2 L) */
+    int S = 64 - __builtin_clzll((uint64_t)E);       /* floor(log2 E) + 1 */
+    int last_bits = E - S;
+    if (last_bits <= 0) return L;
+    uint64_t mask = (1ULL << last_bits) - 1;
+    return (L + mask) & ~mask;
 }
 
 crypto_error_t crypto_generate_identity(OQS_KEM *kem,
@@ -835,9 +937,11 @@ crypto_error_t crypto_generate_identity(OQS_KEM *kem,
 }
 
 /* Builds one recipient record into `rec` (size = X25519_KEY_SIZE + kem ct +
- * nonce + CEK + tag) wrapping `cek` to recipient_pub. Returns CRYPTO_SUCCESS. */
-static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipient_pub,
-                                      const unsigned char cek[QSAFE_CEK_SIZE], unsigned char *rec) {
+ * nonce + key_len + tag) wrapping `key` to recipient_pub, deriving the KEK
+ * under `label` (domain separation per consuming format). */
+crypto_error_t crypto_hybrid_wrap(OQS_KEM *kem, const unsigned char *recipient_pub,
+                                  const char *label, const unsigned char *key,
+                                  size_t key_len, unsigned char *rec) {
     crypto_error_t ret = CRYPTO_ERR_CRYPTO;
     unsigned char eph_sec[X25519_KEY_SIZE];
     unsigned char dh[X25519_KEY_SIZE];
@@ -849,8 +953,8 @@ static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipie
     unsigned char *p_eph = rec;
     unsigned char *p_ct  = p_eph + X25519_KEY_SIZE;
     unsigned char *p_non = p_ct + kem->length_ciphertext;
-    unsigned char *p_cek = p_non + AES_GCM_NONCE_SIZE;
-    unsigned char *p_tag = p_cek + QSAFE_CEK_SIZE;
+    unsigned char *p_key = p_non + AES_GCM_NONCE_SIZE;
+    unsigned char *p_tag = p_key + key_len;
 
     if (!x25519_keypair(eph_sec, p_eph)) goto done;
     if (!x25519_dh(eph_sec, recipient_pub, dh)) goto done;
@@ -858,10 +962,10 @@ static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipie
 
     memcpy(ikm, dh, X25519_KEY_SIZE);
     memcpy(ikm + X25519_KEY_SIZE, kem_ss, kem->length_shared_secret);
-    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, HKDF_HYBRID_LABEL, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
+    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, label, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
 
     if (RAND_bytes(p_non, AES_GCM_NONCE_SIZE) != 1) goto done;
-    if (!gcm_seal(kek, p_non, cek, QSAFE_CEK_SIZE, p_cek, p_tag)) goto done;
+    if (!gcm_seal(kek, p_non, key, (int)key_len, p_key, p_tag)) goto done;
     ret = CRYPTO_SUCCESS;
 
 done:
@@ -873,15 +977,16 @@ done:
     return ret;
 }
 
-/* Attempts to recover the CEK from one recipient record using our secret blob.
- * Returns 1 if the wrap authenticates (cek filled), 0 otherwise. */
-static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
-                             const unsigned char *rec, unsigned char cek[QSAFE_CEK_SIZE]) {
+/* Attempts to recover a wrapped key from one recipient record using our secret
+ * blob. Returns 1 if the wrap authenticates (key filled), 0 otherwise. */
+int crypto_hybrid_unwrap(OQS_KEM *kem, const unsigned char *secret_blob,
+                         const char *label, const unsigned char *rec,
+                         size_t key_len, unsigned char *key_out) {
     const unsigned char *p_eph = rec;
     const unsigned char *p_ct  = p_eph + X25519_KEY_SIZE;
     const unsigned char *p_non = p_ct + kem->length_ciphertext;
-    const unsigned char *p_cek = p_non + AES_GCM_NONCE_SIZE;
-    const unsigned char *p_tag = p_cek + QSAFE_CEK_SIZE;
+    const unsigned char *p_key = p_non + AES_GCM_NONCE_SIZE;
+    const unsigned char *p_tag = p_key + key_len;
 
     unsigned char dh[X25519_KEY_SIZE];
     unsigned char *kem_ss = malloc(kem->length_shared_secret);
@@ -894,8 +999,8 @@ static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
     if (OQS_KEM_decaps(kem, kem_ss, p_ct, secret_blob + X25519_KEY_SIZE) != OQS_SUCCESS) goto done;
     memcpy(ikm, dh, X25519_KEY_SIZE);
     memcpy(ikm + X25519_KEY_SIZE, kem_ss, kem->length_shared_secret);
-    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, HKDF_HYBRID_LABEL, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
-    ok = gcm_open(kek, p_non, p_cek, QSAFE_CEK_SIZE, p_tag, cek);
+    if (hkdf_sha256(ikm, X25519_KEY_SIZE + kem->length_shared_secret, label, kek, sizeof(kek)) != CRYPTO_SUCCESS) goto done;
+    ok = gcm_open(kek, p_non, p_key, (int)key_len, p_tag, key_out);
 
 done:
     OPENSSL_cleanse(dh, sizeof(dh));
@@ -903,6 +1008,17 @@ done:
     OPENSSL_cleanse(kek, sizeof(kek));
     if (kem_ss) { OPENSSL_cleanse(kem_ss, kem->length_shared_secret); free(kem_ss); }
     return ok;
+}
+
+/* v5/v6/v7 container wrappers (fixed 32-byte CEK, v5 hybrid label). */
+static crypto_error_t hybrid_wrap_cek(OQS_KEM *kem, const unsigned char *recipient_pub,
+                                      const unsigned char cek[QSAFE_CEK_SIZE], unsigned char *rec) {
+    return crypto_hybrid_wrap(kem, recipient_pub, HKDF_HYBRID_LABEL, cek, QSAFE_CEK_SIZE, rec);
+}
+
+static int hybrid_unwrap_cek(OQS_KEM *kem, const unsigned char *secret_blob,
+                             const unsigned char *rec, unsigned char cek[QSAFE_CEK_SIZE]) {
+    return crypto_hybrid_unwrap(kem, secret_blob, HKDF_HYBRID_LABEL, rec, QSAFE_CEK_SIZE, cek);
 }
 
 crypto_error_t crypto_encrypt_file(const char *input_filename, const char *output_filename, OQS_KEM *kem,
@@ -920,42 +1036,100 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
     int from_stdin = is_stream_arg(input_filename);
     unsigned char nonce[AES_GCM_NONCE_SIZE];
     unsigned char tag[AES_GCM_TAG_SIZE];
-    unsigned char meta[QSAFE_META_SIZE];
+    unsigned char meta[QSAFE_META_SIZE_V7];
     unsigned char cek[QSAFE_CEK_SIZE];
+
+    /* v7 signed-sender mode state. */
+    int signing = (config->sign_sk_file != NULL);
+    OQS_SIG *sig = NULL;
+    unsigned char *sig_sk = NULL;
+    unsigned char *sig_pk = NULL;
+    size_t sig_sk_len = 0;
+    EVP_MD_CTX *sig_md = NULL;
+    unsigned char trailer[QSAFE_TRAILER_SIZE];
 
     if (n_recipients == 0 || n_recipients > QSAFE_MAX_RECIPIENTS) {
         fprintf(stderr, "Error: recipient count must be between 1 and %d\n", QSAFE_MAX_RECIPIENTS);
         return CRYPTO_ERR_INVALID_INPUT;
     }
 
+    /* Signing needs both the signing secret key and the signer public key to
+     * embed. main.c always supplies both, but the engine is a public API. */
+    if (signing && !config->sign_pk_file) {
+        fprintf(stderr, "Error: --sign-with requires a signer public key\n");
+        return CRYPTO_ERR_INVALID_INPUT;
+    }
+
+    if (signing) {
+        sig = OQS_SIG_new(QSAFE_SIG_ALG);
+        if (!sig || sig->length_public_key != QSAFE_SIG_PUB_SIZE ||
+            sig->length_signature != QSAFE_SIG_MAX_SIZE) {
+            fprintf(stderr, "Error: ML-DSA-87 is not available in this liboqs build\n");
+            if (sig) OQS_SIG_free(sig);
+            return CRYPTO_ERR_CRYPTO;
+        }
+        sig_sk = crypto_load_secret_key(config->sign_sk_file, &sig_sk_len, config);
+        if (!sig_sk || sig_sk_len != sig->length_secret_key) {
+            fprintf(stderr, "Error: failed to load signing secret key (wrong passphrase or not a signing key)\n");
+            if (sig_sk) { OPENSSL_cleanse(sig_sk, sig_sk_len); free(sig_sk); }
+            OQS_SIG_free(sig);
+            return CRYPTO_ERR_FILE_IO;
+        }
+        sig_pk = crypto_load_public_key(config->sign_pk_file, QSAFE_SIG_PUB_SIZE, config);
+        if (!sig_pk) {
+            fprintf(stderr, "Error: failed to load signing public key '%s'\n",
+                    config->sign_pk_file ? config->sign_pk_file : "(null)");
+            OPENSSL_cleanse(sig_sk, sig_sk_len); free(sig_sk);
+            OQS_SIG_free(sig);
+            return CRYPTO_ERR_FILE_IO;
+        }
+    }
+
     in_file = open_input(input_filename);
     if (!in_file) {
         perror("Error opening input file");
-        return CRYPTO_ERR_FILE_IO;
+        ret = CRYPTO_ERR_FILE_IO;
+        goto cleanup;
     }
 
-    /* Build the metadata block. For real files we capture the original name,
-     * permission bits, and mtime; for stdin there is nothing to capture. */
+    /* Build the v7 metadata block. For real files we capture the original name,
+     * permission bits, mtime, and content length; for stdin the length is
+     * unknown (and padding, which needs it, is unavailable). */
     memset(meta, 0, sizeof(meta));
     size_t file_size = 0;
     int have_size = 0;
+    uint64_t content_len = QSAFE_LEN_UNKNOWN;
+    uint64_t pad_len = 0;
     if (!from_stdin) {
         struct stat st;
         if (stat(input_filename, &st) == 0) {
             file_size = (size_t)st.st_size;
             have_size = 1;
+            content_len = (uint64_t)st.st_size;
 
             const char *base = path_basename(input_filename);
             size_t name_len = strlen(base);
             if (name_len > QSAFE_MAX_NAME) name_len = QSAFE_MAX_NAME;
 
-            meta[0] = QSAFE_META_FLAG_PRESENT;
+            meta[0] |= QSAFE_META_FLAG_PRESENT;
             store_u16(meta + 2, (uint16_t)name_len);
             memcpy(meta + 4, base, name_len);
             store_u32(meta + 4 + QSAFE_META_NAME_FIELD, (uint32_t)(st.st_mode & 0777));
             store_u64(meta + 4 + QSAFE_META_NAME_FIELD + 4, (uint64_t)st.st_mtime);
         }
     }
+    if (config->pad) {
+        if (content_len == QSAFE_LEN_UNKNOWN) {
+            fprintf(stderr, "Error: --pad requires a regular file input (stdin length is unknown)\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        pad_len = crypto_padme_size(content_len) - content_len;
+        if (pad_len > 0) meta[0] |= QSAFE_META_FLAG_PADDED;
+    }
+    if (signing) meta[0] |= QSAFE_META_FLAG_SIGNED;
+    store_u64(meta + QSAFE_META_SIZE, content_len);
+    store_u64(meta + QSAFE_META_SIZE + 8, pad_len);
 
     /* Random content key; per-frame nonces are derived from a counter (§ frame_nonce). */
     if (RAND_bytes(cek, QSAFE_CEK_SIZE) != 1) {
@@ -982,7 +1156,7 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         ret = CRYPTO_ERR_MEMORY;
         goto cleanup;
     }
-    memcpy(header, VERSION_HEADER_V6, VERSION_HEADER_SIZE);
+    memcpy(header, VERSION_HEADER_V7, VERSION_HEADER_SIZE);
     header[VERSION_HEADER_SIZE] = (unsigned char)n_recipients;
     for (size_t i = 0; i < n_recipients; i++) {
         unsigned char *rec = header + prefix + i * record_size;
@@ -1014,42 +1188,126 @@ crypto_error_t crypto_encrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    /* Plaintext stream = metadata block followed by the file contents, emitted
-     * as authenticated frames. A full QSAFE_FRAME_SIZE read is a non-final
-     * frame; the first short/empty read ends the stream as the final frame, so
-     * the final frame is always strictly shorter on the wire than a full one. */
+    /* Plaintext stream = META ‖ contents ‖ [signature trailer] ‖ [padding],
+     * emitted as authenticated frames. A full QSAFE_FRAME_SIZE frame is
+     * non-final; the first short/empty frame ends the stream as the final
+     * frame, so the final frame is always strictly shorter on the wire.
+     *
+     * When signing, the embedded signature covers
+     * SHA-256(QSAFE_SIGNED_CONTEXT ‖ header ‖ META ‖ contents), computed
+     * incrementally so the input still streams in constant memory. */
+    if (signing) {
+        sig_md = EVP_MD_CTX_new();
+        if (!sig_md || EVP_DigestInit_ex(sig_md, EVP_sha256(), NULL) != 1 ||
+            EVP_DigestUpdate(sig_md, QSAFE_SIGNED_CONTEXT, strlen(QSAFE_SIGNED_CONTEXT)) != 1 ||
+            EVP_DigestUpdate(sig_md, header, header_len) != 1 ||
+            EVP_DigestUpdate(sig_md, meta, QSAFE_META_SIZE_V7) != 1) {
+            fprintf(stderr, "Error: failed to initialize signing digest\n");
+            crypto_handle_errors();
+            goto cleanup;
+        }
+    }
     {
         size_t meta_off = 0;
         uint64_t ctr = 0;
+        uint64_t content_left = content_len;   /* QSAFE_LEN_UNKNOWN for streams */
+        uint64_t pad_left = pad_len;
+        size_t trailer_off = 0;
+        int content_done = 0, trailer_built = 0;
         size_t total_processed = 0, last_report = 0;
         int done = 0;
         while (!done) {
             size_t filled = 0;
-            if (meta_off < QSAFE_META_SIZE) {
-                size_t take = QSAFE_META_SIZE - meta_off;
+            /* 1) metadata block */
+            if (meta_off < QSAFE_META_SIZE_V7) {
+                size_t take = QSAFE_META_SIZE_V7 - meta_off;
                 if (take > QSAFE_FRAME_SIZE) take = QSAFE_FRAME_SIZE;
                 memcpy(frame_pt, meta + meta_off, take);
                 meta_off += take;
                 filled = take;
             }
-            while (filled < QSAFE_FRAME_SIZE) {
-                size_t n = fread(frame_pt + filled, 1, QSAFE_FRAME_SIZE - filled, in_file);
-                if (n == 0) break;
+            /* 2) file contents. With a known length we read exactly that many
+             * bytes, so a file that shrinks or grows mid-encrypt is an error
+             * rather than a malformed container. */
+            while (!content_done && filled < QSAFE_FRAME_SIZE) {
+                size_t want = QSAFE_FRAME_SIZE - filled;
+                if (content_len != QSAFE_LEN_UNKNOWN && content_left < (uint64_t)want) {
+                    want = (size_t)content_left;
+                }
+                size_t n = want ? fread(frame_pt + filled, 1, want, in_file) : 0;
+                if (n == 0) {
+                    if (ferror(in_file)) {
+                        fprintf(stderr, "Error: Failed to read input file\n");
+                        ret = CRYPTO_ERR_FILE_IO;
+                        goto cleanup;
+                    }
+                    if (content_len != QSAFE_LEN_UNKNOWN && content_left != 0) {
+                        fprintf(stderr, "Error: input shrank while encrypting\n");
+                        ret = CRYPTO_ERR_FILE_IO;
+                        goto cleanup;
+                    }
+                    content_done = 1;
+                    break;
+                }
+                if (sig_md && EVP_DigestUpdate(sig_md, frame_pt + filled, n) != 1) {
+                    fprintf(stderr, "Error: signing digest failed\n");
+                    goto cleanup;
+                }
                 filled += n;
+                if (content_len != QSAFE_LEN_UNKNOWN) {
+                    content_left -= n;
+                    if (content_left == 0) content_done = 1;
+                }
             }
-            if (ferror(in_file)) {
-                fprintf(stderr, "Error: Failed to read input file\n");
-                ret = CRYPTO_ERR_FILE_IO;
-                goto cleanup;
+            /* 3) signature trailer: signer_pub | u16 sig_len | sig (zero-padded) */
+            if (content_done && signing) {
+                if (!trailer_built) {
+                    unsigned char digest[32];
+                    unsigned int dl = 0;
+                    size_t sl = 0;
+                    if (EVP_DigestFinal_ex(sig_md, digest, &dl) != 1 || dl != 32) {
+                        fprintf(stderr, "Error: signing digest failed\n");
+                        goto cleanup;
+                    }
+                    memset(trailer, 0, sizeof(trailer));
+                    memcpy(trailer, sig_pk, QSAFE_SIG_PUB_SIZE);
+                    if (OQS_SIG_sign(sig, trailer + QSAFE_SIG_PUB_SIZE + 2, &sl,
+                                     digest, sizeof(digest), sig_sk) != OQS_SUCCESS ||
+                        sl == 0 || sl > QSAFE_SIG_MAX_SIZE) {
+                        fprintf(stderr, "Error: embedded signing failed\n");
+                        goto cleanup;
+                    }
+                    store_u16(trailer + QSAFE_SIG_PUB_SIZE, (uint16_t)sl);
+                    trailer_built = 1;
+                }
+                if (trailer_off < QSAFE_TRAILER_SIZE && filled < QSAFE_FRAME_SIZE) {
+                    size_t take = QSAFE_TRAILER_SIZE - trailer_off;
+                    if (take > QSAFE_FRAME_SIZE - filled) take = QSAFE_FRAME_SIZE - filled;
+                    memcpy(frame_pt + filled, trailer + trailer_off, take);
+                    trailer_off += take;
+                    filled += take;
+                }
+            }
+            /* 4) size-hiding padding (random bytes; discarded on decrypt) */
+            if (content_done && (!signing || trailer_off == QSAFE_TRAILER_SIZE) &&
+                filled < QSAFE_FRAME_SIZE && pad_left > 0) {
+                size_t take = QSAFE_FRAME_SIZE - filled;
+                if ((uint64_t)take > pad_left) take = (size_t)pad_left;
+                if (RAND_bytes(frame_pt + filled, (int)take) != 1) {
+                    fprintf(stderr, "Error: failed to generate padding\n");
+                    goto cleanup;
+                }
+                pad_left -= take;
+                filled += take;
             }
 
             int last = (filled < QSAFE_FRAME_SIZE) ? 1 : 0;
-            frame_nonce(ctr, last, nonce);
+            crypto_frame_nonce(ctr, last, nonce);
             /* Bind the header into the first frame only; the counter+flag nonce
              * orders the rest and makes truncation detectable. */
             const unsigned char *aad = (ctr == 0) ? header : NULL;
             size_t aadlen = (ctr == 0) ? header_len : 0;
-            if (!gcm_seal_aad(cek, nonce, aad, aadlen, frame_pt, (int)filled, frame_ct, tag)) {
+            if (!crypto_gcm_seal_aad(cek, nonce, aad, aadlen, frame_pt, (int)filled, frame_ct, tag)) {
                 fprintf(stderr, "Error: AES-GCM frame encryption failed\n");
                 crypto_handle_errors();
                 goto cleanup;
@@ -1083,6 +1341,10 @@ cleanup:
     free(frame_ct);
     free(header); /* records hold only public material; the CEK is cleansed below */
     OPENSSL_cleanse(cek, sizeof(cek));
+    if (sig_md) EVP_MD_CTX_free(sig_md);
+    if (sig_sk) { OPENSSL_cleanse(sig_sk, sig_sk_len); free(sig_sk); }
+    free(sig_pk);
+    if (sig) OQS_SIG_free(sig);
     if (ret != CRYPTO_SUCCESS && output_created) {
         remove(output_filename); /* never leave a half-written ciphertext */
     }
@@ -1094,12 +1356,28 @@ cleanup:
 typedef struct {
     int meta_done;
     size_t meta_have;
-    unsigned char meta[QSAFE_META_SIZE];
+    size_t meta_need;          /* 288 for v7, 272 for v5/v6 */
+    unsigned char meta[QSAFE_META_SIZE_V7];
 
     int has_meta;
     char name[QSAFE_MAX_NAME + 1];
     unsigned int mode;
     uint64_t mtime;
+
+    /* v7 payload routing: contents, then an optional fixed-size signature
+     * trailer, then optional padding. */
+    int is_v7;
+    int signed_mode;           /* META flag bit 1: signature trailer present */
+    int padded;                /* META flag bit 2: padding present */
+    uint64_t content_len;      /* QSAFE_LEN_UNKNOWN when the encryptor streamed */
+    uint64_t pad_len;
+    uint64_t content_written;
+    uint64_t pad_seen;
+    unsigned char tbuf[QSAFE_TRAILER_SIZE]; /* trailer (or rolling holdback) */
+    size_t tlen;
+    EVP_MD_CTX *sig_md;        /* SHA-256(ctx ‖ header ‖ META ‖ contents) */
+    const unsigned char *header_ptr; /* container header, hashed when signed */
+    size_t header_len;
 
     FILE *out;
     int out_created;
@@ -1174,46 +1452,14 @@ static crypto_error_t dec_sink_open(dec_sink_t *s) {
     return CRYPTO_SUCCESS;
 }
 
-/* Feed decrypted plaintext bytes through the sink. Returns CRYPTO_SUCCESS or an
- * error code. */
-static crypto_error_t dec_sink_write(dec_sink_t *s, const unsigned char *p, size_t n) {
-    if (!s->meta_done) {
-        size_t need = QSAFE_META_SIZE - s->meta_have;
-        size_t take = n < need ? n : need;
-        memcpy(s->meta + s->meta_have, p, take);
-        s->meta_have += take;
-        p += take;
-        n -= take;
-
-        if (s->meta_have < QSAFE_META_SIZE) {
-            return CRYPTO_SUCCESS; /* still collecting metadata */
-        }
-
-        /* Parse the metadata block. */
-        s->has_meta = (s->meta[0] & QSAFE_META_FLAG_PRESENT) != 0;
-        if (s->has_meta) {
-            uint16_t nl = load_u16(s->meta + 2);
-            if (nl > QSAFE_MAX_NAME) nl = QSAFE_MAX_NAME;
-            memcpy(s->name, s->meta + 4, nl);
-            s->name[nl] = '\0';
-            /* Reject path components in the stored name (traversal defense). */
-            const char *base = path_basename(s->name);
-            if (base != s->name) memmove(s->name, base, strlen(base) + 1);
-            if (strcmp(s->name, "..") == 0) s->name[0] = '\0';
-            s->mode = load_u32(s->meta + 4 + QSAFE_META_NAME_FIELD);
-            s->mtime = load_u64(s->meta + 4 + QSAFE_META_NAME_FIELD + 4);
-        }
-        s->meta_done = 1;
-
-        crypto_error_t orc = dec_sink_open(s);
-        if (orc != CRYPTO_SUCCESS) return orc;
-    }
-
+/* Emits authenticated content bytes to the output (or drops them for
+ * verify-only / user-skipped runs). Deferred outputs accumulate instead. */
+static crypto_error_t dec_sink_emit(dec_sink_t *s, const unsigned char *p, size_t n) {
     if (n == 0 || s->skipped || !s->out) {
         return CRYPTO_SUCCESS;
     }
 
-    /* Pipe/stdout: accumulate, do not release until the tag verifies. */
+    /* Pipe/stdout (v5): accumulate, do not release until the tag verifies. */
     if (s->defer) {
         if (s->buf_len + n > s->buf_cap) {
             size_t newcap = s->buf_cap ? s->buf_cap : BUFFER_SIZE;
@@ -1237,6 +1483,213 @@ static crypto_error_t dec_sink_write(dec_sink_t *s, const unsigned char *p, size
     if (fwrite(p, 1, n, s->out) != n) {
         fprintf(stderr, "Error: Failed to write output file\n");
         return CRYPTO_ERR_FILE_IO;
+    }
+    return CRYPTO_SUCCESS;
+}
+
+/* One byte-chunk of file *contents*: hash it (signed mode) and emit it. */
+static crypto_error_t dec_sink_content(dec_sink_t *s, const unsigned char *p, size_t n) {
+    if (s->sig_md && n > 0 && EVP_DigestUpdate(s->sig_md, p, n) != 1) {
+        fprintf(stderr, "Error: signature digest failed\n");
+        return CRYPTO_ERR_CRYPTO;
+    }
+    s->content_written += n;
+    return dec_sink_emit(s, p, n);
+}
+
+/* Feed decrypted plaintext bytes through the sink. Returns CRYPTO_SUCCESS or an
+ * error code. */
+static crypto_error_t dec_sink_write(dec_sink_t *s, const unsigned char *p, size_t n) {
+    if (!s->meta_done) {
+        size_t need = s->meta_need - s->meta_have;
+        size_t take = n < need ? n : need;
+        memcpy(s->meta + s->meta_have, p, take);
+        s->meta_have += take;
+        p += take;
+        n -= take;
+
+        if (s->meta_have < s->meta_need) {
+            return CRYPTO_SUCCESS; /* still collecting metadata */
+        }
+
+        /* Parse the metadata block. */
+        s->has_meta = (s->meta[0] & QSAFE_META_FLAG_PRESENT) != 0;
+        if (s->has_meta) {
+            uint16_t nl = load_u16(s->meta + 2);
+            if (nl > QSAFE_MAX_NAME) nl = QSAFE_MAX_NAME;
+            memcpy(s->name, s->meta + 4, nl);
+            s->name[nl] = '\0';
+            /* Reject path components in the stored name (traversal defense). */
+            const char *base = path_basename(s->name);
+            if (base != s->name) memmove(s->name, base, strlen(base) + 1);
+            if (strcmp(s->name, "..") == 0) s->name[0] = '\0';
+            s->mode = load_u32(s->meta + 4 + QSAFE_META_NAME_FIELD);
+            s->mtime = load_u64(s->meta + 4 + QSAFE_META_NAME_FIELD + 4);
+        }
+        if (s->is_v7) {
+            s->signed_mode = (s->meta[0] & QSAFE_META_FLAG_SIGNED) != 0;
+            s->padded = (s->meta[0] & QSAFE_META_FLAG_PADDED) != 0;
+            s->content_len = load_u64(s->meta + QSAFE_META_SIZE);
+            s->pad_len = load_u64(s->meta + QSAFE_META_SIZE + 8);
+            /* Padding needs a declared length to strip; the pad flag and pad
+             * length must agree. */
+            if ((s->padded && (s->content_len == QSAFE_LEN_UNKNOWN || s->pad_len == 0)) ||
+                (!s->padded && s->pad_len != 0)) {
+                fprintf(stderr, "Error: inconsistent padding declaration in metadata\n");
+                return CRYPTO_ERR_INVALID_INPUT;
+            }
+            if (s->signed_mode) {
+                s->sig_md = EVP_MD_CTX_new();
+                if (!s->sig_md ||
+                    EVP_DigestInit_ex(s->sig_md, EVP_sha256(), NULL) != 1 ||
+                    EVP_DigestUpdate(s->sig_md, QSAFE_SIGNED_CONTEXT, strlen(QSAFE_SIGNED_CONTEXT)) != 1 ||
+                    EVP_DigestUpdate(s->sig_md, s->header_ptr, s->header_len) != 1 ||
+                    EVP_DigestUpdate(s->sig_md, s->meta, QSAFE_META_SIZE_V7) != 1) {
+                    fprintf(stderr, "Error: failed to initialize signature digest\n");
+                    return CRYPTO_ERR_CRYPTO;
+                }
+            }
+        }
+        s->meta_done = 1;
+
+        crypto_error_t orc = dec_sink_open(s);
+        if (orc != CRYPTO_SUCCESS) return orc;
+    }
+
+    if (n == 0) {
+        return CRYPTO_SUCCESS;
+    }
+
+    /* v5/v6 payloads (and unsigned, unpadded v7 streams) are pure contents. */
+    if (!s->is_v7 || (!s->signed_mode && !s->padded && s->content_len == QSAFE_LEN_UNKNOWN)) {
+        return dec_sink_emit(s, p, n);
+    }
+
+    /* Known content length: split contents | trailer | padding exactly. */
+    if (s->content_len != QSAFE_LEN_UNKNOWN) {
+        while (n > 0) {
+            if (s->content_written < s->content_len) {
+                uint64_t left = s->content_len - s->content_written;
+                size_t take = (uint64_t)n < left ? n : (size_t)left;
+                crypto_error_t rc = dec_sink_content(s, p, take);
+                if (rc != CRYPTO_SUCCESS) return rc;
+                p += take;
+                n -= take;
+            } else if (s->signed_mode && s->tlen < QSAFE_TRAILER_SIZE) {
+                size_t take = QSAFE_TRAILER_SIZE - s->tlen;
+                if (take > n) take = n;
+                memcpy(s->tbuf + s->tlen, p, take);
+                s->tlen += take;
+                p += take;
+                n -= take;
+            } else if (s->pad_seen < s->pad_len) {
+                uint64_t left = s->pad_len - s->pad_seen;
+                size_t take = (uint64_t)n < left ? n : (size_t)left;
+                s->pad_seen += take; /* padding is discarded */
+                p += take;
+                n -= take;
+            } else {
+                fprintf(stderr, "Error: encrypted payload longer than declared\n");
+                return CRYPTO_ERR_INVALID_INPUT;
+            }
+        }
+        return CRYPTO_SUCCESS;
+    }
+
+    /* Unknown content length with a signature trailer (signed stdin stream):
+     * hold back the last QSAFE_TRAILER_SIZE bytes; everything older is
+     * contents. */
+    {
+        size_t total = s->tlen + n;
+        if (total > QSAFE_TRAILER_SIZE) {
+            size_t release = total - QSAFE_TRAILER_SIZE;
+            size_t from_buf = release < s->tlen ? release : s->tlen;
+            if (from_buf > 0) {
+                crypto_error_t rc = dec_sink_content(s, s->tbuf, from_buf);
+                if (rc != CRYPTO_SUCCESS) return rc;
+                memmove(s->tbuf, s->tbuf + from_buf, s->tlen - from_buf);
+                s->tlen -= from_buf;
+                release -= from_buf;
+            }
+            if (release > 0) {
+                crypto_error_t rc = dec_sink_content(s, p, release);
+                if (rc != CRYPTO_SUCCESS) return rc;
+                p += release;
+                n -= release;
+            }
+        }
+        memcpy(s->tbuf + s->tlen, p, n);
+        s->tlen += n;
+        return CRYPTO_SUCCESS;
+    }
+}
+
+/* Called once every frame has authenticated: enforce the declared layout and
+ * verify the embedded sender signature, if any. */
+static crypto_error_t dec_sink_finish(dec_sink_t *s, const crypto_config_t *config) {
+    if (!s->is_v7) return CRYPTO_SUCCESS;
+
+    if (s->content_len != QSAFE_LEN_UNKNOWN) {
+        if (s->content_written != s->content_len ||
+            (s->signed_mode && s->tlen != QSAFE_TRAILER_SIZE) ||
+            s->pad_seen != s->pad_len) {
+            fprintf(stderr, "Error: encrypted payload shorter than declared\n");
+            return CRYPTO_ERR_INVALID_INPUT;
+        }
+    } else if (s->signed_mode && s->tlen != QSAFE_TRAILER_SIZE) {
+        fprintf(stderr, "Error: signed file is too short to contain its signature\n");
+        return CRYPTO_ERR_INVALID_INPUT;
+    }
+
+    if (!s->signed_mode) return CRYPTO_SUCCESS;
+
+    const unsigned char *signer_pk = s->tbuf;
+    uint16_t sl = load_u16(s->tbuf + QSAFE_SIG_PUB_SIZE);
+    if (sl == 0 || sl > QSAFE_SIG_MAX_SIZE) {
+        fprintf(stderr, "Error: invalid embedded signature length\n");
+        return CRYPTO_ERR_INVALID_INPUT;
+    }
+
+    unsigned char digest[32];
+    unsigned int dl = 0;
+    if (EVP_DigestFinal_ex(s->sig_md, digest, &dl) != 1 || dl != 32) {
+        fprintf(stderr, "Error: signature digest failed\n");
+        return CRYPTO_ERR_CRYPTO;
+    }
+
+    OQS_SIG *sig = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!sig) {
+        fprintf(stderr, "Error: ML-DSA-87 is not available in this liboqs build\n");
+        return CRYPTO_ERR_CRYPTO;
+    }
+    OQS_STATUS vr = OQS_SIG_verify(sig, digest, sizeof(digest),
+                                   s->tbuf + QSAFE_SIG_PUB_SIZE + 2, sl, signer_pk);
+    OQS_SIG_free(sig);
+    if (vr != OQS_SUCCESS) {
+        fprintf(stderr, "Error: embedded sender signature verification FAILED\n");
+        return CRYPTO_ERR_INTEGRITY;
+    }
+
+    /* --signer: pin the embedded signer to a specific public key. */
+    if (config->signer_pk_file) {
+        unsigned char *expect = crypto_load_public_key(config->signer_pk_file,
+                                                       QSAFE_SIG_PUB_SIZE, config);
+        if (!expect) {
+            fprintf(stderr, "Error: failed to load expected signer key '%s'\n",
+                    config->signer_pk_file);
+            return CRYPTO_ERR_FILE_IO;
+        }
+        int match = (CRYPTO_memcmp(expect, signer_pk, QSAFE_SIG_PUB_SIZE) == 0);
+        free(expect);
+        if (!match) {
+            fprintf(stderr, "Error: file is signed, but not by the expected signer\n");
+            return CRYPTO_ERR_INTEGRITY;
+        }
+    }
+
+    char fp[65];
+    if (crypto_fingerprint(signer_pk, QSAFE_SIG_PUB_SIZE, fp, sizeof(fp)) == CRYPTO_SUCCESS) {
+        fprintf(stderr, "Signed by (ML-DSA-87, SHA-256 fingerprint): %s\n", fp);
     }
     return CRYPTO_SUCCESS;
 }
@@ -1271,7 +1724,8 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
     unsigned char cek[QSAFE_CEK_SIZE];
     unsigned char magic[VERSION_HEADER_SIZE];
     int have_cek = 0;
-    int is_v6 = 0;
+    int framed = 0;   /* v6/v7 framed payload vs. v5 single-AEAD */
+    int is_v7 = 0;
     size_t holdn = 0;
 
     dec_sink_t sink;
@@ -1279,6 +1733,7 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
     sink.output_arg = output_filename;
     sink.config = config;
     sink.verify_only = config->check_only;
+    sink.content_len = QSAFE_LEN_UNKNOWN;
 
     in_file = open_input(input_filename);
     if (!in_file) {
@@ -1286,21 +1741,26 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         return CRYPTO_ERR_FILE_IO;
     }
 
-    /* Identify the format by its 8-byte magic (v6 = framed, v5 = single-AEAD). */
+    /* Identify the format by its 8-byte magic (v7/v6 = framed, v5 = single-AEAD). */
     if (fread(magic, 1, sizeof(magic), in_file) != sizeof(magic)) {
         fprintf(stderr, "Error: Invalid file format or version\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
-    if (memcmp(magic, VERSION_HEADER_V6, VERSION_HEADER_SIZE) == 0) {
-        is_v6 = 1;
+    if (memcmp(magic, VERSION_HEADER_V7, VERSION_HEADER_SIZE) == 0) {
+        framed = 1;
+        is_v7 = 1;
+    } else if (memcmp(magic, VERSION_HEADER_V6, VERSION_HEADER_SIZE) == 0) {
+        framed = 1;
     } else if (memcmp(magic, VERSION_HEADER, VERSION_HEADER_SIZE) == 0) {
-        is_v6 = 0;
+        framed = 0;
     } else {
         fprintf(stderr, "Error: Invalid file format or version\n");
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
+    sink.is_v7 = is_v7;
+    sink.meta_need = is_v7 ? QSAFE_META_SIZE_V7 : QSAFE_META_SIZE;
 
     unsigned char cnt;
     if (fread(&cnt, 1, 1, in_file) != 1) {
@@ -1319,9 +1779,9 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
                          AES_GCM_NONCE_SIZE + QSAFE_CEK_SIZE + AES_GCM_TAG_SIZE;
 
     /* Reconstruct the exact header bytes for AAD:
-     *   v5: magic(8) | count(1) | payload_nonce(12) | records
-     *   v6: magic(8) | count(1) | records                          */
-    size_t prefix = VERSION_HEADER_SIZE + 1 + (is_v6 ? 0 : AES_GCM_NONCE_SIZE);
+     *   v5:    magic(8) | count(1) | payload_nonce(12) | records
+     *   v6/v7: magic(8) | count(1) | records                       */
+    size_t prefix = VERSION_HEADER_SIZE + 1 + (framed ? 0 : AES_GCM_NONCE_SIZE);
     size_t header_len = prefix + n_recipients * record_size;
     header = malloc(header_len);
     if (!header) {
@@ -1330,7 +1790,7 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
     }
     memcpy(header, magic, VERSION_HEADER_SIZE);
     header[VERSION_HEADER_SIZE] = cnt;
-    if (!is_v6) {
+    if (!framed) {
         if (fread(header + VERSION_HEADER_SIZE + 1, 1, AES_GCM_NONCE_SIZE, in_file) != AES_GCM_NONCE_SIZE) {
             fprintf(stderr, "Error: truncated header\n");
             ret = CRYPTO_ERR_INVALID_INPUT;
@@ -1343,6 +1803,8 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         ret = CRYPTO_ERR_INVALID_INPUT;
         goto cleanup;
     }
+    sink.header_ptr = header;
+    sink.header_len = header_len;
 
     /* Recover the content key from whichever record is ours. */
     for (size_t i = 0; i < n_recipients; i++) {
@@ -1357,7 +1819,7 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
-    if (is_v6) {
+    if (framed) {
         /* --- framed payload: verify each frame, then release it (constant
          * memory, and no unverified bytes ever reach the output). --- */
         sink.frame_verified = 1;
@@ -1385,10 +1847,10 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
             }
             int last = (n < want) ? 1 : 0;
             size_t ptlen = n - AES_GCM_TAG_SIZE;
-            frame_nonce(ctr, last, nonce);
+            crypto_frame_nonce(ctr, last, nonce);
             const unsigned char *aad = (ctr == 0) ? header : NULL;
             size_t aadlen = (ctr == 0) ? header_len : 0;
-            if (!gcm_open_aad(cek, nonce, aad, aadlen, cbuf, (int)ptlen, cbuf + ptlen, pbuf)) {
+            if (!crypto_gcm_open_aad(cek, nonce, aad, aadlen, cbuf, (int)ptlen, cbuf + ptlen, pbuf)) {
                 fprintf(stderr, "Error: Authentication failed - file corrupt or wrong key\n");
                 ret = CRYPTO_ERR_INTEGRITY;
                 goto cleanup;
@@ -1475,6 +1937,11 @@ crypto_error_t crypto_decrypt_file(const char *input_filename, const char *outpu
         goto cleanup;
     }
 
+    /* Enforce the declared v7 layout and verify the embedded sender signature
+     * (if any) now that every frame has authenticated. */
+    ret = dec_sink_finish(&sink, config);
+    if (ret != CRYPTO_SUCCESS) goto cleanup;
+
     /* Release any deferred (v5 pipe) output now that authentication passed. */
     ret = dec_sink_commit(&sink);
     if (ret != CRYPTO_SUCCESS) goto cleanup;
@@ -1489,6 +1956,8 @@ cleanup:
         OPENSSL_cleanse(sink.buf, sink.buf_len); /* may hold plaintext */
         free(sink.buf);
     }
+    if (sink.sig_md) EVP_MD_CTX_free(sink.sig_md);
+    OPENSSL_cleanse(sink.tbuf, sizeof(sink.tbuf)); /* may hold held-back plaintext */
     free(in_buffer);
     free(out_buffer);
     free(work);
@@ -1601,8 +2070,6 @@ crypto_error_t crypto_process_directory(const char *dir_path, const char *output
  * to the exact file contents. Signing keys are independent of encryption keys:
  * a signing secret key is passphrase-wrapped with the same scheme as a KEM
  * secret key, and the signing public key is stored in the clear. */
-
-#define QSAFE_SIG_ALG OQS_SIG_alg_ml_dsa_87
 
 /* Streams a file (or stdin for "-") through SHA-256. */
 static crypto_error_t sha256_file(const char *path, unsigned char out[32]) {
@@ -1769,4 +2236,138 @@ done:
     free(signature);
     OQS_SIG_free(sig);
     return ret;
+}
+
+/* --- Raw in-memory ML-DSA-87 (for the PQXDH module) --- */
+
+crypto_error_t crypto_sig_keypair_raw(unsigned char pk[QSAFE_SIG_PUB_SIZE],
+                                      unsigned char sk[QSAFE_SIG_SEC_SIZE]) {
+    OQS_SIG *sig = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!sig) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_CRYPTO;
+    if (sig->length_public_key == QSAFE_SIG_PUB_SIZE &&
+        sig->length_secret_key == QSAFE_SIG_SEC_SIZE &&
+        OQS_SIG_keypair(sig, pk, sk) == OQS_SUCCESS)
+        ret = CRYPTO_SUCCESS;
+    OQS_SIG_free(sig);
+    return ret;
+}
+
+crypto_error_t crypto_sig_sign_buf(const unsigned char *msg, size_t msg_len,
+                                   const unsigned char sk[QSAFE_SIG_SEC_SIZE],
+                                   unsigned char *sig_out, size_t *sig_len) {
+    if ((!msg && msg_len) || !sk || !sig_out || !sig_len) return CRYPTO_ERR_INVALID_INPUT;
+    OQS_SIG *sig = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!sig) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_CRYPTO;
+    size_t sl = 0;
+    if (sig->length_secret_key == QSAFE_SIG_SEC_SIZE &&
+        OQS_SIG_sign(sig, sig_out, &sl, msg, msg_len, sk) == OQS_SUCCESS) {
+        *sig_len = sl;
+        ret = CRYPTO_SUCCESS;
+    }
+    OQS_SIG_free(sig);
+    return ret;
+}
+
+crypto_error_t crypto_sig_verify_buf(const unsigned char *msg, size_t msg_len,
+                                     const unsigned char *sig, size_t sig_len,
+                                     const unsigned char pk[QSAFE_SIG_PUB_SIZE]) {
+    if ((!msg && msg_len) || !sig || !pk) return CRYPTO_ERR_INVALID_INPUT;
+    OQS_SIG *s = OQS_SIG_new(QSAFE_SIG_ALG);
+    if (!s) return CRYPTO_ERR_CRYPTO;
+    crypto_error_t ret = CRYPTO_ERR_INTEGRITY;
+    if (s->length_public_key == QSAFE_SIG_PUB_SIZE &&
+        OQS_SIG_verify(s, msg, msg_len, sig, sig_len, pk) == OQS_SUCCESS)
+        ret = CRYPTO_SUCCESS;
+    OQS_SIG_free(s);
+    return ret;
+}
+
+/* --- Passphrase-encrypted at-rest envelope (Argon2id + AES-256-GCM) ---
+ * Layout: salt(KDF_SALT_SIZE) | nonce(12) | commit(32) | ct(pt_len) | tag(16). One
+ * reusable primitive for anything held at rest under a passphrase (ratchet session,
+ * PQXDH identity, ...). Argon2id 64 MiB / t=3 / p=1.
+ *
+ * KEY COMMITMENT: AES-GCM is not key-committing, so a single ciphertext can be
+ * crafted to open validly under two different keys — the basis of partitioning-
+ * oracle attacks that speed up guessing a low-entropy passphrase. We split the
+ * Argon2id output into an encryption subkey and a published commitment subkey; the
+ * commitment binds the ciphertext to exactly one key, so at most one passphrase can
+ * ever open a given blob. (The per-message ratchet AEAD is deliberately not
+ * committed: its keys are high-entropy, single-use HKDF outputs an attacker cannot
+ * grind.) */
+#define AT_REST_COMMIT_SIZE 32
+static crypto_error_t at_rest_subkeys(const unsigned char key[AES_KEY_SIZE],
+                                      unsigned char ke[AES_KEY_SIZE],
+                                      unsigned char kc[AT_REST_COMMIT_SIZE]) {
+    static const char ENC[] = "Veil-AtRest-Enc-v1", COMMIT[] = "Veil-AtRest-Commit-v1";
+    crypto_error_t rc = crypto_hkdf_sha256(key, AES_KEY_SIZE, NULL, 0,
+                                           (const unsigned char *)ENC, sizeof ENC - 1,
+                                           ke, AES_KEY_SIZE);
+    if (rc != CRYPTO_SUCCESS) return rc;
+    return crypto_hkdf_sha256(key, AES_KEY_SIZE, NULL, 0,
+                              (const unsigned char *)COMMIT, sizeof COMMIT - 1,
+                              kc, AT_REST_COMMIT_SIZE);
+}
+
+crypto_error_t crypto_seal_at_rest(const char *passphrase,
+                                   const unsigned char *pt, size_t pt_len,
+                                   unsigned char **out, size_t *out_len) {
+    if (!passphrase || (!pt && pt_len) || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    size_t total = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + AT_REST_COMMIT_SIZE + pt_len + AES_GCM_TAG_SIZE;
+    unsigned char *b = malloc(total);
+    if (!b) return CRYPTO_ERR_MEMORY;
+    crypto_error_t rc = CRYPTO_ERR_CRYPTO;
+    unsigned char key[AES_KEY_SIZE], ke[AES_KEY_SIZE], kc[AT_REST_COMMIT_SIZE];
+    if (RAND_bytes(b, KDF_SALT_SIZE) != 1 ||
+        RAND_bytes(b + KDF_SALT_SIZE, AES_GCM_NONCE_SIZE) != 1) goto done;
+    if (crypto_derive_key_argon2id(passphrase, b, 65536, 3, 1, key) != CRYPTO_SUCCESS) goto done;
+    if (at_rest_subkeys(key, ke, kc) != CRYPTO_SUCCESS) goto done;
+    unsigned char *commit = b + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    memcpy(commit, kc, AT_REST_COMMIT_SIZE);
+    unsigned char *ct = commit + AT_REST_COMMIT_SIZE;
+    unsigned char tag[AES_GCM_TAG_SIZE];
+    if (!crypto_gcm_seal_aad(ke, b + KDF_SALT_SIZE, NULL, 0, pt, (int)pt_len, ct, tag)) goto done;
+    memcpy(ct + pt_len, tag, AES_GCM_TAG_SIZE);
+    *out = b; *out_len = total; b = NULL;
+    rc = CRYPTO_SUCCESS;
+done:
+    OPENSSL_cleanse(key, sizeof key);
+    OPENSSL_cleanse(ke, sizeof ke);
+    OPENSSL_cleanse(kc, sizeof kc);
+    if (b) free(b);
+    return rc;
+}
+
+crypto_error_t crypto_open_at_rest(const char *passphrase,
+                                   const unsigned char *blob, size_t blob_len,
+                                   unsigned char **out, size_t *out_len) {
+    if (!passphrase || !blob || !out || !out_len) return CRYPTO_ERR_INVALID_INPUT;
+    size_t hdr = KDF_SALT_SIZE + AES_GCM_NONCE_SIZE + AT_REST_COMMIT_SIZE;
+    if (blob_len < hdr + AES_GCM_TAG_SIZE) return CRYPTO_ERR_INTEGRITY;
+    size_t pt_len = blob_len - hdr - AES_GCM_TAG_SIZE;
+    unsigned char key[AES_KEY_SIZE], ke[AES_KEY_SIZE], kc[AT_REST_COMMIT_SIZE];
+    if (crypto_derive_key_argon2id(passphrase, blob, 65536, 3, 1, key) != CRYPTO_SUCCESS)
+        return CRYPTO_ERR_CRYPTO;
+    crypto_error_t rc = at_rest_subkeys(key, ke, kc);
+    OPENSSL_cleanse(key, sizeof key);
+    if (rc != CRYPTO_SUCCESS) { OPENSSL_cleanse(ke, sizeof ke); OPENSSL_cleanse(kc, sizeof kc); return rc; }
+    /* Verify the key commitment before trusting the AEAD (constant-time). This is
+     * what makes the envelope key-committing: a blob opens under at most one key. */
+    const unsigned char *commit = blob + KDF_SALT_SIZE + AES_GCM_NONCE_SIZE;
+    if (CRYPTO_memcmp(commit, kc, AT_REST_COMMIT_SIZE) != 0) {
+        OPENSSL_cleanse(ke, sizeof ke); OPENSSL_cleanse(kc, sizeof kc);
+        return CRYPTO_ERR_INTEGRITY;
+    }
+    OPENSSL_cleanse(kc, sizeof kc);
+    unsigned char *pt = malloc(pt_len ? pt_len : 1);
+    if (!pt) { OPENSSL_cleanse(ke, sizeof ke); return CRYPTO_ERR_MEMORY; }
+    const unsigned char *ct = blob + hdr;
+    int ok = crypto_gcm_open_aad(ke, blob + KDF_SALT_SIZE, NULL, 0,
+                                 ct, (int)pt_len, ct + pt_len, pt);
+    OPENSSL_cleanse(ke, sizeof ke);
+    if (!ok) { OPENSSL_cleanse(pt, pt_len); free(pt); return CRYPTO_ERR_INTEGRITY; }
+    *out = pt; *out_len = pt_len;
+    return CRYPTO_SUCCESS;
 }

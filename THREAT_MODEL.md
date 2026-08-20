@@ -91,16 +91,20 @@ derived from a passphrase via **scrypt**.
 An observer of a `.qsafe` file learns:
 
 - **Approximate plaintext size** — ciphertext length ≈ plaintext + a fixed
-  overhead. Qsafe does **not** pad.
+  overhead. `--pad` (v8+) reduces this to a Padmé bucket (the length then
+  leaks only O(log log n) bits of the true size, at ≤ ~12% overhead); without
+  `--pad` the size is essentially exact.
 - **The number of recipients** — the header stores the recipient count, and each
   recipient adds a fixed-size record. Recipient *identities* are not stored, but
   the count and the file's growth with more recipients are visible.
-- **That the file is a Qsafe file** — the `QSAFE005` magic is in cleartext.
+- **That the file is a Qsafe file** — the `QSAFE007` magic is in cleartext.
 - **For directories:** the structure and per-file sizes (each file is encrypted
   individually).
 
 The original filename, permission bits, and mtime ARE encrypted (inside the
-authenticated payload) and are not leaked.
+authenticated payload) and are not leaked. So is the embedded sender
+signature (`--sign-with`): whether a file is signed, and by whom, is visible
+only to someone who can decrypt it.
 
 ---
 
@@ -113,7 +117,7 @@ Qsafe is the wrong tool.
    recipient secret key. If that key (and passphrase) are later compromised,
    **all** past files encrypted to it can be decrypted. The ephemeral X25519 key
    protects the *sender's* side only.
-2. **Release of unverified plaintext (RUP).** The current format (QSAFE006) is
+2. **Release of unverified plaintext (RUP).** The current format (QSAFE007) is
    **framed**: the payload is a sequence of 64 KiB frames, each authenticated
    independently, and **each frame's plaintext is released only after that
    frame's tag verifies** — for both files and pipes, in constant memory. No
@@ -138,8 +142,16 @@ Qsafe is the wrong tool.
    this is best-effort, not a guarantee against a privileged adversary.
 4. **Passphrase strength is your responsibility.** scrypt slows guessing, but a
    weak passphrase on a stolen key file is the weakest link.
-5. **No deniability or anti-traffic-analysis.** No plausible-deniability mode, no
-   padding, no hidden volumes, no metadata anonymity.
+5. **The standard container (`encrypt`/`decrypt`) offers no deniability or
+   anti-traffic-analysis.** It has a visible `QSAFE007` magic, a visible
+   recipient count, and no plausible-deniability mode; `--pad` blunts *size*
+   leakage and nothing else. A **separate, opt-in** format —
+   `qsafe vault` (experimental, [docs/HIDDEN_VOLUMES.md](docs/HIDDEN_VOLUMES.md))
+   — does provide deniable hidden volumes, but it is a distinct symmetric-only
+   container with its own threat model and its own limitations (notably: broken
+   by an adversary holding two snapshots of the same container). It is not a
+   property of the normal encrypt path, and nothing here retrofits deniability
+   onto a `.qsafe` file.
 6. **No replay/freshness context.** Qsafe authenticates that a file is intact and
    addressed to you; it does not bind a file to a time, sequence, or context.
    Re-sending an old valid ciphertext is not detected by Qsafe itself.
@@ -147,6 +159,24 @@ Qsafe is the wrong tool.
    listed recipient can read the file and could redistribute the plaintext.
 8. **Signatures sign a SHA-256 digest**, not the raw message. SHA-256 collision
    resistance is assumed (this is standard hash-then-sign).
+9. **Unsigned files carry no sender authenticity.** Anyone with your public
+   key can produce a ciphertext that decrypts cleanly. `--sign-with` (v8+)
+   closes this: the embedded ML-DSA-87 signature binds the contents *and* the
+   recipient set to the signer, and decrypt fails closed on a bad signature.
+   Note a legitimate *recipient* can always decrypt and re-encrypt the
+   contents unsigned — the signature proves origin, not exclusivity.
+10. **Key shares are unencrypted key material.** `split-key` shares
+    reconstruct the secret key *without* a passphrase (that is their purpose:
+    passphrase-loss recovery). Below the threshold they reveal nothing
+    (information-theoretic), but each share must be guarded like a key
+    fragment. The share files record a SHA-256 digest of the secret blob for
+    integrity, which also lets someone holding a *candidate* secret blob
+    confirm it matches a share set. **Consequence — only split high-entropy
+    secrets.** Because that digest sits in *every* share header, a holder of a
+    *single* share (below threshold) can brute-force/confirm a *guessable*
+    secret offline — so the information-theoretic secrecy above only holds for
+    high-entropy inputs (a random key). Do **not** `split-key` a passphrase or
+    other low-entropy value; split the random key it protects instead.
 
 ---
 
@@ -168,14 +198,20 @@ Qsafe's guarantees hold only if:
 
 ## 8. Assurance measures in this repository
 
-- **Known-answer tests** for SHA-256, HKDF-SHA256, and scrypt with values
-  computed independently of Qsafe's code (`tests/test_crypto_utils.c`).
+- **Known-answer tests** for SHA-256, HKDF-SHA256, scrypt, the QSAFE007 frame
+  AEAD, and the `vault` salt derivation, with values computed independently of
+  Qsafe's code (`tests/test_crypto_utils.c`), plus frozen container fixtures
+  for both formats.
 - **AddressSanitizer + UndefinedBehaviorSanitizer + Valgrind** over the test
   suite in CI (`.github/workflows/hardening.yml`).
-- **Fuzzing harness** over the untrusted-input parsers
-  (`tests/fuzz_decrypt.c`, `make fuzz`) with a CI smoke run.
+- **Fuzzing harnesses** over the untrusted-input parsers — the QSAFE
+  decrypt/inspect/dearmor path (`tests/fuzz_decrypt.c`) and the `vault`
+  hidden-volume reader (`tests/fuzz_vault.c`) — via `make fuzz` / `make
+  fuzz-vault`, with CI smoke runs and OSS-Fuzz build targets.
 - **End-to-end tests** for tamper rejection, wrong-key rejection,
-  multi-recipient isolation, and signature forgery rejection (`tests/test.sh`).
+  multi-recipient isolation, signature forgery rejection, and `vault`
+  deniability (wrong-passphrase and empty-region failures are byte-for-byte
+  identical) (`tests/test.sh`).
 
 These raise confidence; they are **not** a substitute for an independent audit
 (see [SECURITY.md](SECURITY.md)).

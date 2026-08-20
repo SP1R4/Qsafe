@@ -61,15 +61,46 @@ LIBRARY = libqsafe$(LIBEXT)
 SRC_DIR = src
 TEST_DIR = tests
 
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/age.c $(SRC_DIR)/keychain.c $(SRC_DIR)/sss.c $(SRC_DIR)/vault.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/pqxdh.c $(SRC_DIR)/merkle.c $(SRC_DIR)/translog.c $(SRC_DIR)/group.c $(SRC_DIR)/treekem.c
 OBJECTS = $(SOURCES:.c=.o)
 EXECUTABLE = qsafe$(EXEEXT)
 
-TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c
+TEST_SOURCES = $(TEST_DIR)/test_crypto_utils.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
 TEST_EXECUTABLE = $(TEST_DIR)/test_crypto$(EXEEXT)
 
-all: $(EXECUTABLE)
+# Double Ratchet module tests: behavioural conversation + key-schedule KAT.
+RATCHET_TEST_SOURCES = $(TEST_DIR)/test_ratchet.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+RATCHET_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet$(EXEEXT)
+RATCHET_KAT_SOURCES = $(TEST_DIR)/test_ratchet_kat.c $(SRC_DIR)/crypto_utils.c
+RATCHET_KAT_EXECUTABLE = $(TEST_DIR)/test_ratchet_kat$(EXEEXT)
+PQXDH_TEST_SOURCES = $(TEST_DIR)/test_pqxdh.c $(SRC_DIR)/pqxdh.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+PQXDH_TEST_EXECUTABLE = $(TEST_DIR)/test_pqxdh$(EXEEXT)
+PQRATCHET_TEST_SOURCES = $(TEST_DIR)/test_pqratchet.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+PQRATCHET_TEST_EXECUTABLE = $(TEST_DIR)/test_pqratchet$(EXEEXT)
+SOAK_TEST_SOURCES = $(TEST_DIR)/test_ratchet_soak.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+SOAK_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet_soak$(EXEEXT)
+HE_TEST_SOURCES = $(TEST_DIR)/test_ratchet_he.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/crypto_utils.c
+HE_TEST_EXECUTABLE = $(TEST_DIR)/test_ratchet_he$(EXEEXT)
+MERKLE_TEST_SOURCES = $(TEST_DIR)/test_merkle.c $(SRC_DIR)/merkle.c
+MERKLE_TEST_EXECUTABLE = $(TEST_DIR)/test_merkle$(EXEEXT)
+TRANSLOG_TEST_SOURCES = $(TEST_DIR)/test_translog.c $(SRC_DIR)/translog.c $(SRC_DIR)/merkle.c $(SRC_DIR)/crypto_utils.c
+TRANSLOG_TEST_EXECUTABLE = $(TEST_DIR)/test_translog$(EXEEXT)
+GROUP_TEST_SOURCES = $(TEST_DIR)/test_group.c $(SRC_DIR)/group.c $(SRC_DIR)/treekem.c $(SRC_DIR)/crypto_utils.c
+GROUP_TEST_EXECUTABLE = $(TEST_DIR)/test_group$(EXEEXT)
+TREEKEM_TEST_SOURCES = $(TEST_DIR)/test_treekem.c $(SRC_DIR)/treekem.c $(SRC_DIR)/crypto_utils.c
+TREEKEM_TEST_EXECUTABLE = $(TEST_DIR)/test_treekem$(EXEEXT)
+
+# age plugin: post-quantum hybrid recipients for the age ecosystem.
+PLUGIN = age-plugin-qsafe$(EXEEXT)
+PLUGIN_OBJECTS = $(SRC_DIR)/age_plugin.o $(SRC_DIR)/crypto_utils.o
+
+all: $(EXECUTABLE) $(PLUGIN)
+
+plugin: $(PLUGIN)
+
+$(PLUGIN): $(PLUGIN_OBJECTS)
+	$(CC) $(EXTRA_CFLAGS) $(PLUGIN_OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 # EXTRA_CFLAGS / EXTRA_LDFLAGS are appended to every compile and link, so CI can
 # layer in sanitizers without clobbering the baseline flags, e.g.:
@@ -78,23 +109,91 @@ all: $(EXECUTABLE)
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(EXTRA_CFLAGS) $(OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
-%.o: %.c
+HEADERS = $(wildcard include/*.h)
+
+%.o: %.c $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -c $< -o $@
 
-test: $(EXECUTABLE) $(TEST_EXECUTABLE)
+test: $(EXECUTABLE) $(TEST_EXECUTABLE) test-ratchet
 	./$(TEST_EXECUTABLE)
 	$(TEST_DIR)/test.sh
 
 $(TEST_EXECUTABLE): $(TEST_OBJECTS)
 	$(CC) $(EXTRA_CFLAGS) $(TEST_OBJECTS) -o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
+# Double Ratchet: build both harnesses from source (no shared .o with the main
+# binary so sanitizer flags can be layered independently) and run them.
+test-ratchet: $(RATCHET_TEST_EXECUTABLE) $(RATCHET_KAT_EXECUTABLE) $(PQXDH_TEST_EXECUTABLE) $(PQRATCHET_TEST_EXECUTABLE) $(SOAK_TEST_EXECUTABLE) $(HE_TEST_EXECUTABLE) $(MERKLE_TEST_EXECUTABLE) $(TRANSLOG_TEST_EXECUTABLE) $(GROUP_TEST_EXECUTABLE) $(TREEKEM_TEST_EXECUTABLE)
+	./$(RATCHET_KAT_EXECUTABLE)
+	./$(RATCHET_TEST_EXECUTABLE)
+	./$(PQXDH_TEST_EXECUTABLE)
+	./$(PQRATCHET_TEST_EXECUTABLE)
+	./$(SOAK_TEST_EXECUTABLE)
+	./$(HE_TEST_EXECUTABLE)
+	./$(MERKLE_TEST_EXECUTABLE)
+	./$(TRANSLOG_TEST_EXECUTABLE)
+	./$(GROUP_TEST_EXECUTABLE)
+	./$(TREEKEM_TEST_EXECUTABLE)
+
+$(PQRATCHET_TEST_EXECUTABLE): $(PQRATCHET_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(PQRATCHET_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(HE_TEST_EXECUTABLE): $(HE_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(HE_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(MERKLE_TEST_EXECUTABLE): $(MERKLE_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(MERKLE_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(TRANSLOG_TEST_EXECUTABLE): $(TRANSLOG_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(TRANSLOG_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(GROUP_TEST_EXECUTABLE): $(GROUP_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(GROUP_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(TREEKEM_TEST_EXECUTABLE): $(TREEKEM_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(TREEKEM_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(SOAK_TEST_EXECUTABLE): $(SOAK_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(SOAK_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(RATCHET_TEST_EXECUTABLE): $(RATCHET_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(RATCHET_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(RATCHET_KAT_EXECUTABLE): $(RATCHET_KAT_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(RATCHET_KAT_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+$(PQXDH_TEST_EXECUTABLE): $(PQXDH_TEST_SOURCES) $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(PQXDH_TEST_SOURCES) -o $@ \
+		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
 # --- Shared library (libqsafe) ------------------------------------------------
 # A stable C API around the engine; used by the language bindings (python/).
 lib: $(LIBRARY)
 
-$(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c
+$(LIBRARY): $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/libqsafe.c $(SRC_DIR)/vault.c $(SRC_DIR)/ratchet.c $(SRC_DIR)/pqxdh.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) -fPIC -shared $^ -o $@ \
 		$(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
+
+# --- Constant-time check (Linux + valgrind) -----------------------------------
+# ctgrind-style harness: secrets are marked uninitialized and valgrind flags
+# any branch/index that depends on them. Run: make ct && valgrind
+# --error-exitcode=1 tests/ct_check
+CT_EXECUTABLE = $(TEST_DIR)/ct_check$(EXEEXT)
+
+ct: $(CT_EXECUTABLE)
+
+$(CT_EXECUTABLE): $(TEST_DIR)/ct_check.c $(SRC_DIR)/crypto_utils.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EXTRA_CFLAGS) $(TEST_DIR)/ct_check.c $(SRC_DIR)/crypto_utils.o \
+		-o $@ $(LDFLAGS) $(EXTRA_LDFLAGS) $(LDLIBS)
 
 # --- Fuzzing (requires clang + libFuzzer) -------------------------------------
 # Builds an instrumented harness over the untrusted-input parsers. Run with:
@@ -110,13 +209,35 @@ $(FUZZ_EXECUTABLE): $(TEST_DIR)/fuzz_decrypt.c $(SRC_DIR)/crypto_utils.c
 		$(TEST_DIR)/fuzz_decrypt.c $(SRC_DIR)/crypto_utils.c \
 		-o $@ $(LDFLAGS) $(LDLIBS)
 
+# vault (hidden volumes) has its own harness: see tests/fuzz_vault.c for why
+# it fuzzes raw container bytes only, not the (offset, capacity) arithmetic.
+FUZZ_VAULT_EXECUTABLE = $(TEST_DIR)/fuzz_vault
+
+fuzz-vault: $(FUZZ_VAULT_EXECUTABLE)
+
+$(FUZZ_VAULT_EXECUTABLE): $(TEST_DIR)/fuzz_vault.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
+	$(FUZZ_CC) $(CPPFLAGS) -g -O1 -fsanitize=$(FUZZ_SANITIZE) \
+		$(TEST_DIR)/fuzz_vault.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c \
+		-o $@ $(LDFLAGS) $(LDLIBS)
+
+# vault v2 directory parser: attacker-influenced bytes once an anchor decrypts.
+FUZZ_VAULT_DIR_EXECUTABLE = $(TEST_DIR)/fuzz_vault_dir
+
+fuzz-vault-dir: $(FUZZ_VAULT_DIR_EXECUTABLE)
+
+$(FUZZ_VAULT_DIR_EXECUTABLE): $(TEST_DIR)/fuzz_vault_dir.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c
+	$(FUZZ_CC) $(CPPFLAGS) -g -O1 -fsanitize=$(FUZZ_SANITIZE) \
+		$(TEST_DIR)/fuzz_vault_dir.c $(SRC_DIR)/crypto_utils.c $(SRC_DIR)/vault.c \
+		-o $@ $(LDFLAGS) $(LDLIBS)
+
 MANDIR ?= $(PREFIX)/share/man/man1
 BASHCOMPDIR ?= $(PREFIX)/etc/bash_completion.d
 ZSHCOMPDIR ?= $(PREFIX)/share/zsh/site-functions
 
-install: $(EXECUTABLE)
+install: $(EXECUTABLE) $(PLUGIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(EXECUTABLE) $(DESTDIR)$(BINDIR)/$(EXECUTABLE)
+	install -m 0755 $(PLUGIN) $(DESTDIR)$(BINDIR)/$(PLUGIN)
 	install -d $(DESTDIR)$(MANDIR)
 	install -m 0644 docs/qsafe.1 $(DESTDIR)$(MANDIR)/qsafe.1
 
@@ -134,6 +255,6 @@ uninstall:
 	rm -f $(DESTDIR)$(ZSHCOMPDIR)/_qsafe
 
 clean:
-	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY)
+	rm -f $(OBJECTS) $(EXECUTABLE) $(TEST_OBJECTS) $(TEST_EXECUTABLE) $(FUZZ_EXECUTABLE) $(LIBRARY) $(PLUGIN) $(SRC_DIR)/age_plugin.o $(CT_EXECUTABLE)
 
-.PHONY: all test lib fuzz install install-completions uninstall clean
+.PHONY: all test lib plugin ct fuzz install install-completions uninstall clean

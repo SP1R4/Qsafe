@@ -18,11 +18,13 @@
 #include "crypto_utils.h"
 #include "age.h"
 #include "keychain.h"
+#include "sss.h"
+#include "vault.h"
 
 #define KEYCHAIN_SERVICE "qsafe"
 
 #define PROGRAM_NAME "qsafe"
-#define VERSION "7.0.0"
+#define VERSION "8.0.0"
 #define MAX_PASSPHRASE 1024
 #define DEFAULT_SIGN_KEY_FILE "sign_key.bin"
 
@@ -39,9 +41,21 @@ static void print_usage(void) {
     printf("  %s sign    [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s verify-sig [options] <input> [signature]\n", PROGRAM_NAME);
     printf("  %s keys    <list|path|import <name> <pubkey>|remove <name>>\n", PROGRAM_NAME);
+    printf("  %s split-key --threshold <t> --shares <n> [prefix]\n", PROGRAM_NAME);
+    printf("  %s join-key <share> <share> [share...]\n", PROGRAM_NAME);
     printf("  %s age-keygen [keyfile]\n", PROGRAM_NAME);
     printf("  %s age-encrypt -r <age1...> <input> [output]\n", PROGRAM_NAME);
     printf("  %s age-decrypt -i <keyfile> <input> [output]\n", PROGRAM_NAME);
+    printf("  %s vault init <path> --size <bytes>\n", PROGRAM_NAME);
+    printf("  %s vault write <path> --offset <n> --capacity <n> <input>\n", PROGRAM_NAME);
+    printf("  %s vault read  <path> --offset <n> --capacity <n> <output>\n", PROGRAM_NAME);
+    printf("  %s vault footprint --capacity <n>\n", PROGRAM_NAME);
+    printf("  %s vault create <path> --size <bytes>          (v2: passphrase-addressed volume)\n", PROGRAM_NAME);
+    printf("  %s vault add <path> <file> --name <s> [--offset <n>] [--capacity <n>]\n", PROGRAM_NAME);
+    printf("  %s vault ls|rm <path> [--name <s>]\n", PROGRAM_NAME);
+    printf("  %s vault extract <path> --name <s> <output>\n", PROGRAM_NAME);
+    printf("  %s vault passwd <path> --new-passphrase-file <p>\n", PROGRAM_NAME);
+    printf("  %s secrets set|get|list|rm [key]    (encrypted credential store)\n", PROGRAM_NAME);
     printf("\n");
     printf("Commands:\n");
     printf("  keygen       Generate a hybrid X25519 + ML-KEM-1024 keypair (run once)\n");
@@ -54,9 +68,13 @@ static void print_usage(void) {
     printf("  sign         Create a detached signature for a file\n");
     printf("  verify-sig   Verify a detached signature against a file\n");
     printf("  keys         Manage the keyring (~/.qsafe): list/import/remove recipients\n");
+    printf("  split-key    Split the secret key into n shares, any t of which recover it\n");
+    printf("  join-key     Reconstruct a secret key from shares (re-wraps with a new passphrase)\n");
     printf("  age-keygen   Generate an age (X25519) keypair\n");
     printf("  age-encrypt  Encrypt to age 'age1...' recipients (interop; classical only)\n");
     printf("  age-decrypt  Decrypt an age file with an age identity file (-i)\n");
+    printf("  vault        Deniable hidden-volume containers (experimental; docs/HIDDEN_VOLUMES.md)\n");
+    printf("  secrets      Encrypted key-value credential store over a vault volume\n");
     printf("\n");
     printf("Files vs. directories are detected automatically. Use '-' as the input\n");
     printf("or output to read from stdin / write to stdout.\n");
@@ -70,9 +88,23 @@ static void print_usage(void) {
     printf("  --passphrase <str>      Passphrase (discouraged; visible to other users)\n");
     printf("  --passphrase-file <p>   Read the passphrase from the first line of a file\n");
     printf("  --check                 decrypt/verify: authenticate only, write nothing\n");
+    printf("  --sign-with <sk>        encrypt: embed an ML-DSA-87 sender signature (needs <sk>.pub)\n");
+    printf("  --signer <pk>           decrypt/verify: require the embedded signer to be this key\n");
+    printf("  --pad                   encrypt: hide the exact file size (Padme padding)\n");
+    printf("  --threshold <t>         split-key: shares needed to reconstruct (2-16)\n");
+    printf("  --shares <n>            split-key: total shares to create (t-255)\n");
     printf("  --armor                 encrypt: ASCII base64 output; decrypt: base64 input\n");
     printf("  --scrypt-cost <n>       keygen/rekey: scrypt cost as log2(N), 14-22 (default 15)\n");
-    printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS)\n");
+    printf("  --keychain              store/derive the key passphrase in the OS keychain (macOS/Windows)\n");
+    printf("  --size <bytes>          vault init/create: total container size\n");
+    printf("  --offset <bytes>        vault write/read: slot offset (vault add: optional; auto-placed if omitted)\n");
+    printf("  --capacity <bytes>      vault write/read/footprint: slot capacity (vault add: optional; exact fit if omitted)\n");
+    printf("  --name <s>              vault add/extract/rm: slot name within a volume\n");
+    printf("  --keep <ppfile>         vault create/add/rm: also preserve this volume (repeatable)\n");
+    printf("  --keyfile <path>        vault v2: require this keyfile as a second factor\n");
+    printf("  --argon2                vault v2: derive keys with Argon2id (--scrypt-cost sets memory in KiB)\n");
+    printf("  --store <path>          secrets: store file (default: ~/.qsafe/secrets.bin)\n");
+    printf("  --new-passphrase-file <p> vault passwd: file holding the replacement passphrase\n");
     printf("  --verbose               Enable verbose output\n");
     printf("  --force                 Overwrite output without prompting\n");
     printf("  --help                  Display this help message\n");
@@ -429,6 +461,203 @@ static int run_age_command(const char *command, const char *const *positionals, 
     return 0;
 }
 
+/* --------------------------- hidden volumes (vault) -----------------------
+ * Deniable, symmetric-only containers — see docs/HIDDEN_VOLUMES.md. Handled
+ * before the hybrid (X25519 + ML-KEM) engine sets up: vault needs none of it. */
+/* Reads the first line of a passphrase file into out (no echo of secrets to
+ * argv). Strips a trailing newline. Returns 1 on success. */
+static int read_passphrase_file(const char *path, char *out, size_t outsz) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char *r = fgets(out, (int)outsz, f);
+    fclose(f);
+    if (!r) return 0;
+    strip_eol(out);
+    return out[0] != '\0';
+}
+
+static int run_vault_command(const char *const *positionals, int npos,
+                             crypto_config_t *config, const char *cli_passphrase,
+                             const char *passphrase_file, uint64_t vault_size,
+                             uint64_t vault_offset, int vault_offset_set,
+                             uint64_t vault_capacity, int vault_capacity_set,
+                             const char *vault_name, const char *const *vault_keeps, int n_keeps,
+                             const char *vault_new_pp_file,
+                             char *passbuf, size_t passbuf_size) {
+    const char *sub = positionals[0];
+    if (!sub) {
+        fprintf(stderr, "Error: vault <init|create|add|ls|extract|rm|passwd|write|read|footprint> ...\n");
+        return 1;
+    }
+
+    if (strcmp(sub, "init") == 0) {
+        if (npos != 2) { fprintf(stderr, "Error: vault init <path> --size <bytes>\n"); return 1; }
+        if (vault_size == 0) { fprintf(stderr, "Error: vault init requires --size <bytes>\n"); return 1; }
+        return vault_init(positionals[1], vault_size, config->force_overwrite) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    if (strcmp(sub, "footprint") == 0) {
+        if (!vault_capacity_set) { fprintf(stderr, "Error: vault footprint --capacity <bytes>\n"); return 1; }
+        printf("%llu\n", (unsigned long long)vault_ciphertext_len(vault_capacity));
+        return 0;
+    }
+
+    if (strcmp(sub, "write") == 0 || strcmp(sub, "read") == 0) {
+        if (npos != 3) {
+            fprintf(stderr, "Error: vault %s <container> --offset <n> --capacity <n> <input|output>\n", sub);
+            return 1;
+        }
+        if (!vault_offset_set || !vault_capacity_set) {
+            fprintf(stderr, "Error: vault %s requires --offset and --capacity\n", sub);
+            return 1;
+        }
+        if (resolve_passphrase(config, cli_passphrase, passphrase_file, 0, passbuf, passbuf_size) != CRYPTO_SUCCESS) {
+            return 1;
+        }
+        crypto_error_t ret = (strcmp(sub, "write") == 0)
+            ? vault_write(positionals[1], vault_offset, vault_capacity, positionals[2], config)
+            : vault_read(positionals[1], vault_offset, vault_capacity, positionals[2], config);
+        return ret == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    /* --- v2 volume commands (whole-container rewrite) --- */
+    int is_create = strcmp(sub, "create") == 0;
+    int is_add = strcmp(sub, "add") == 0;
+    int is_ls = strcmp(sub, "ls") == 0;
+    int is_extract = strcmp(sub, "extract") == 0;
+    int is_rm = strcmp(sub, "rm") == 0;
+    int is_passwd = strcmp(sub, "passwd") == 0;
+
+    if (is_create || is_add || is_ls || is_extract || is_rm || is_passwd) {
+        if (npos < 2) { fprintf(stderr, "Error: vault %s needs a container path\n", sub); return 1; }
+        const char *container = positionals[1];
+
+        if (resolve_passphrase(config, cli_passphrase, passphrase_file, is_create, passbuf, passbuf_size) != CRYPTO_SUCCESS)
+            return 1;
+
+        /* Resolve --keep passphrase files into strings (volumes to preserve). */
+        char keepbuf[16][MAX_PASSPHRASE];
+        const char *keeps[16];
+        for (int k = 0; k < n_keeps; k++) {
+            if (!read_passphrase_file(vault_keeps[k], keepbuf[k], sizeof(keepbuf[k]))) {
+                fprintf(stderr, "Error: cannot read --keep passphrase file '%s'\n", vault_keeps[k]);
+                return 1;
+            }
+            keeps[k] = keepbuf[k];
+        }
+
+        crypto_error_t ret;
+        if (is_create) {
+            ret = vault_volume_create(container, vault_size, config, config->force_overwrite, keeps, n_keeps);
+        } else if (is_ls) {
+            ret = vault_volume_ls(container, config);
+        } else if (is_extract) {
+            if (!vault_name || npos < 3) { fprintf(stderr, "Error: vault extract <container> --name <s> <output>\n"); return 1; }
+            ret = vault_volume_extract(container, vault_name, positionals[2], config);
+        } else if (is_add) {
+            if (!vault_name || npos < 3) { fprintf(stderr, "Error: vault add <container> <file> --name <s> [--offset <n>] [--capacity <n>]\n"); return 1; }
+            ret = vault_volume_add(container, vault_name, positionals[2],
+                                   vault_offset, vault_offset_set,
+                                   vault_capacity, vault_capacity_set, config, keeps, n_keeps);
+        } else if (is_rm) {
+            if (!vault_name) { fprintf(stderr, "Error: vault rm <container> --name <s>\n"); return 1; }
+            ret = vault_volume_rm(container, vault_name, config, keeps, n_keeps);
+        } else { /* is_passwd */
+            if (!vault_new_pp_file) { fprintf(stderr, "Error: vault passwd <container> --new-passphrase-file <path>\n"); return 1; }
+            char newpp[MAX_PASSPHRASE];
+            if (!read_passphrase_file(vault_new_pp_file, newpp, sizeof(newpp))) {
+                fprintf(stderr, "Error: cannot read --new-passphrase-file '%s'\n", vault_new_pp_file);
+                return 1;
+            }
+            ret = vault_volume_passwd(container, config, newpp, keeps, n_keeps);
+            OPENSSL_cleanse(newpp, sizeof(newpp));
+        }
+        return ret == CRYPTO_SUCCESS ? 0 : 1;
+    }
+
+    fprintf(stderr, "Error: unknown vault subcommand '%s'\n", sub);
+    return 1;
+}
+
+/* ------------------------- secrets (key-value store) ----------------------
+ * A credential store layered on a vault volume: `qsafe secrets set|get|list|rm`.
+ * Values move only in memory (never a temp file). The default store is
+ * $QSAFE_HOME/secrets.bin (~/.qsafe/secrets.bin); --store overrides it. */
+static int run_secrets_command(const char *const *positionals, int npos,
+                               crypto_config_t *config, const char *cli_passphrase,
+                               const char *passphrase_file, const char *store_override,
+                               char *passbuf, size_t passbuf_size) {
+    const char *sub = positionals[0];
+    if (!sub) { fprintf(stderr, "Error: secrets <set|get|list|rm> [key]\n"); return 1; }
+
+    /* Resolve the store path. */
+    char storebuf[MAX_PATH_LENGTH];
+    const char *store = store_override;
+    if (!store) {
+        const char *over = getenv("QSAFE_HOME");
+        char base[MAX_PATH_LENGTH];
+        if (over && *over) {
+            snprintf(base, sizeof(base), "%s", over);
+        } else {
+            const char *home = qsafe_home_dir();
+            if (!home) { fprintf(stderr, "Error: cannot locate home (set HOME or --store)\n"); return 1; }
+            snprintf(base, sizeof(base), "%s/.qsafe", home);
+        }
+        if (snprintf(storebuf, sizeof(storebuf), "%s/secrets.bin", base) >= (int)sizeof(storebuf)) return 1;
+        store = storebuf;
+        if (strcmp(sub, "set") == 0) qsafe_mkdir_p(base); /* ensure the dir exists for a first `set` */
+    }
+
+    if (resolve_passphrase(config, cli_passphrase, passphrase_file, 0, passbuf, passbuf_size) != CRYPTO_SUCCESS)
+        return 1;
+
+    if (strcmp(sub, "set") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets set <key>  (value on stdin)\n"); return 1; }
+        const char *key = positionals[1];
+        /* Read the value from stdin (no temp file). A tty prompts without echo. */
+        unsigned char *val = NULL; size_t vlen = 0, cap = 0;
+        if (qsafe_isatty_stdin()) {
+            char line[MAX_PASSPHRASE];
+            if (!read_hidden("Value: ", line, sizeof(line))) { fprintf(stderr, "Error: no value read\n"); return 1; }
+            vlen = strlen(line);
+            val = malloc(vlen ? vlen : 1);
+            if (!val) return 1;
+            memcpy(val, line, vlen);
+            OPENSSL_cleanse(line, sizeof(line));
+        } else {
+            cap = 4096; val = malloc(cap);
+            if (!val) return 1;
+            size_t n;
+            unsigned char tmp[4096];
+            while ((n = fread(tmp, 1, sizeof(tmp), stdin)) > 0) {
+                if (vlen + n > cap) { cap = (vlen + n) * 2; unsigned char *nv = realloc(val, cap); if (!nv) { free(val); return 1; } val = nv; }
+                memcpy(val + vlen, tmp, n); vlen += n;
+            }
+            OPENSSL_cleanse(tmp, sizeof(tmp));
+            /* Strip a single trailing newline (convenience for `echo`/typing). */
+            if (vlen > 0 && val[vlen - 1] == '\n') vlen--;
+        }
+        crypto_error_t r = vault_secret_put(store, key, val, (uint64_t)vlen, config);
+        OPENSSL_cleanse(val, vlen ? vlen : 1);
+        free(val);
+        if (r == CRYPTO_SUCCESS) fprintf(stderr, "Stored '%s'\n", key);
+        return r == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "get") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets get <key>\n"); return 1; }
+        return vault_secret_get(store, positionals[1], config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "list") == 0) {
+        return vault_secret_list(store, config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    if (strcmp(sub, "rm") == 0) {
+        if (npos < 2) { fprintf(stderr, "Error: secrets rm <key>\n"); return 1; }
+        return vault_secret_rm(store, positionals[1], config) == CRYPTO_SUCCESS ? 0 : 1;
+    }
+    fprintf(stderr, "Error: unknown secrets subcommand '%s'\n", sub);
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     /* On Windows, keep stdin/stdout binary so piped ciphertext isn't corrupted
      * by CRLF translation. No-op on POSIX. */
@@ -451,14 +680,33 @@ int main(int argc, char *argv[]) {
     config.public_key_file = NULL;
     config.passphrase = NULL;
     config.use_keychain = 0;
+    config.sign_sk_file = NULL;
+    config.sign_pk_file = NULL;
+    config.signer_pk_file = NULL;
+    config.pad = 0;
+    config.vault_keyfile_key = NULL;
+    config.vault_kdf_argon2 = 0;
 
     const char *command = NULL;
     const char *cli_passphrase = NULL;
     const char *passphrase_file = NULL;
+    const char *sign_with = NULL;       /* encrypt: --sign-with signing secret key */
+    unsigned int sss_threshold = 0;     /* split-key: --threshold */
+    unsigned int sss_shares = 0;        /* split-key: --shares */
     const char *pub_file_opt = NULL;
+    uint64_t vault_size = 0;            /* vault init: --size */
+    uint64_t vault_offset = 0;          /* vault write/read: --offset */
+    uint64_t vault_capacity = 0;        /* vault write/read/footprint: --capacity */
+    int vault_offset_set = 0, vault_capacity_set = 0;
+    const char *vault_name = NULL;      /* vault add/extract/rm: --name */
+    const char *vault_keeps[16];        /* vault create/add/rm: --keep passphrase files */
+    int n_vault_keeps = 0;
+    const char *vault_keyfile_path = NULL; /* vault v2: --keyfile (two-factor) */
+    const char *vault_new_pp_file = NULL;  /* vault passwd: --new-passphrase-file */
+    const char *secrets_store = NULL;      /* secrets: --store <path> (default ~/.qsafe/secrets.bin) */
     const char *identity_name = NULL;
     const char *identity_file = NULL;   /* age-decrypt: AGE-SECRET-KEY file */
-    const char *positionals[3] = { NULL, NULL, NULL };
+    const char *positionals[16] = { NULL };  /* join-key takes up to 16 shares */
     int npos = 0;
     int key_file_set = 0;
     const char *recipient_opts[QSAFE_MAX_RECIPIENTS];
@@ -484,6 +732,32 @@ int main(int argc, char *argv[]) {
             config.use_keychain = 1;
         } else if (strcmp(a, "--armor") == 0) {
             config.armor = 1;
+        } else if (strcmp(a, "--pad") == 0) {
+            config.pad = 1;
+        } else if (strcmp(a, "--sign-with") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --sign-with requires a signing key path\n"); return 1; }
+            sign_with = argv[i];
+        } else if (strcmp(a, "--signer") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --signer requires a public key path\n"); return 1; }
+            config.signer_pk_file = argv[i];
+        } else if (strcmp(a, "--threshold") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --threshold requires a number\n"); return 1; }
+            char *end = NULL;
+            long v = strtol(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < SSS_MIN_THRESHOLD || v > SSS_MAX_THRESHOLD) {
+                fprintf(stderr, "Error: --threshold must be in [%d, %d]\n", SSS_MIN_THRESHOLD, SSS_MAX_THRESHOLD);
+                return 1;
+            }
+            sss_threshold = (unsigned int)v;
+        } else if (strcmp(a, "--shares") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --shares requires a number\n"); return 1; }
+            char *end = NULL;
+            long v = strtol(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < SSS_MIN_THRESHOLD || v > SSS_MAX_SHARES) {
+                fprintf(stderr, "Error: --shares must be in [%d, %d]\n", SSS_MIN_THRESHOLD, SSS_MAX_SHARES);
+                return 1;
+            }
+            sss_shares = (unsigned int)v;
         } else if (strcmp(a, "--key-file") == 0) {
             if (++i >= argc) { fprintf(stderr, "Error: --key-file requires a path\n"); return 1; }
             config.secret_key_file = argv[i];
@@ -521,6 +795,46 @@ int main(int argc, char *argv[]) {
             config.scrypt_n = 1ULL << logn;
             config.scrypt_r = SCRYPT_DEFAULT_R;
             config.scrypt_p = SCRYPT_DEFAULT_P;
+        } else if (strcmp(a, "--size") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --size requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --size must be a byte count\n"); return 1; }
+            vault_size = (uint64_t)v;
+        } else if (strcmp(a, "--offset") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --offset requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --offset must be a byte count\n"); return 1; }
+            vault_offset = (uint64_t)v;
+            vault_offset_set = 1;
+        } else if (strcmp(a, "--capacity") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --capacity requires a byte count\n"); return 1; }
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[i], &end, 10);
+            if (end == argv[i] || *end != '\0') { fprintf(stderr, "Error: --capacity must be a byte count\n"); return 1; }
+            vault_capacity = (uint64_t)v;
+            vault_capacity_set = 1;
+        } else if (strcmp(a, "--name") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --name requires a value\n"); return 1; }
+            vault_name = argv[i];
+        } else if (strcmp(a, "--keyfile") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --keyfile requires a path\n"); return 1; }
+            vault_keyfile_path = argv[i];
+        } else if (strcmp(a, "--new-passphrase-file") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --new-passphrase-file requires a path\n"); return 1; }
+            vault_new_pp_file = argv[i];
+        } else if (strcmp(a, "--argon2") == 0) {
+            config.vault_kdf_argon2 = 1;
+        } else if (strcmp(a, "--store") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --store requires a path\n"); return 1; }
+            secrets_store = argv[i];
+        } else if (strcmp(a, "--keep") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Error: --keep requires a passphrase file\n"); return 1; }
+            if (n_vault_keeps >= (int)(sizeof(vault_keeps) / sizeof(vault_keeps[0]))) {
+                fprintf(stderr, "Error: too many --keep files\n"); return 1;
+            }
+            vault_keeps[n_vault_keeps++] = argv[i];
         } else if (a[0] == '-' && a[1] == '-') {
             fprintf(stderr, "Error: unknown option '%s'\n", a);
             return 1;
@@ -529,7 +843,7 @@ int main(int argc, char *argv[]) {
             if (strcmp(a, "version") == 0) { printf("%s %s\n", PROGRAM_NAME, VERSION); return 0; }
             command = a;
         } else {
-            if (npos >= 3) {
+            if (npos >= (int)(sizeof(positionals) / sizeof(positionals[0]))) {
                 fprintf(stderr, "Error: too many arguments\n");
                 return 1;
             }
@@ -552,12 +866,17 @@ int main(int argc, char *argv[]) {
     int is_sign = strcmp(command, "sign") == 0;
     int is_verify_sig = strcmp(command, "verify-sig") == 0;
     int is_keys = strcmp(command, "keys") == 0;
+    int is_split_key = strcmp(command, "split-key") == 0;
+    int is_join_key = strcmp(command, "join-key") == 0;
     int is_age_keygen = strcmp(command, "age-keygen") == 0;
     int is_age_encrypt = strcmp(command, "age-encrypt") == 0;
     int is_age_decrypt = strcmp(command, "age-decrypt") == 0;
+    int is_vault = strcmp(command, "vault") == 0;
+    int is_secrets = strcmp(command, "secrets") == 0;
     if (!is_keygen && !is_encrypt && !is_decrypt && !is_verify && !is_rekey &&
         !is_inspect && !is_sign_keygen && !is_sign && !is_verify_sig && !is_keys &&
-        !is_age_keygen && !is_age_encrypt && !is_age_decrypt) {
+        !is_split_key && !is_join_key &&
+        !is_age_keygen && !is_age_encrypt && !is_age_decrypt && !is_vault && !is_secrets) {
         fprintf(stderr, "Error: unknown command '%s'\n\n", command);
         print_usage();
         return 1;
@@ -568,6 +887,43 @@ int main(int argc, char *argv[]) {
     if (is_age_keygen || is_age_encrypt || is_age_decrypt) {
         return run_age_command(command, positionals, npos,
                                recipient_opts, n_recipient_opts, identity_file);
+    }
+
+    /* vault (hidden volumes) is a second, symmetric-only container format —
+     * see docs/HIDDEN_VOLUMES.md — with no dependency on the hybrid identity
+     * system either, so it is handled before OQS_KEM init too. */
+    if (is_vault) {
+        char passbuf_vault[MAX_PASSPHRASE];
+        memset(passbuf_vault, 0, sizeof(passbuf_vault));
+        unsigned char vault_keyfile_key[32];
+        if (vault_keyfile_path) {
+            if (vault_keyfile_from_file(vault_keyfile_path, vault_keyfile_key) != CRYPTO_SUCCESS) {
+                fprintf(stderr, "Error: cannot read --keyfile '%s'\n", vault_keyfile_path);
+                return 1;
+            }
+            config.vault_keyfile_key = vault_keyfile_key;
+        }
+        return run_vault_command(positionals, npos, &config, cli_passphrase, passphrase_file,
+                                 vault_size, vault_offset, vault_offset_set,
+                                 vault_capacity, vault_capacity_set,
+                                 vault_name, vault_keeps, n_vault_keeps, vault_new_pp_file,
+                                 passbuf_vault, sizeof(passbuf_vault));
+    }
+
+    /* secrets is a credential store over a vault volume — same no-KEM path. */
+    if (is_secrets) {
+        char passbuf_sec[MAX_PASSPHRASE];
+        memset(passbuf_sec, 0, sizeof(passbuf_sec));
+        unsigned char sec_keyfile_key[32];
+        if (vault_keyfile_path) {
+            if (vault_keyfile_from_file(vault_keyfile_path, sec_keyfile_key) != CRYPTO_SUCCESS) {
+                fprintf(stderr, "Error: cannot read --keyfile '%s'\n", vault_keyfile_path);
+                return 1;
+            }
+            config.vault_keyfile_key = sec_keyfile_key;
+        }
+        return run_secrets_command(positionals, npos, &config, cli_passphrase, passphrase_file,
+                                   secrets_store, passbuf_sec, sizeof(passbuf_sec));
     }
 
     /* verify is decrypt that authenticates but writes nothing. */
@@ -858,6 +1214,80 @@ int main(int argc, char *argv[]) {
         ret = CRYPTO_ERR_INVALID_INPUT; goto cleanup;
     }
 
+    /* ---------------- split-key (Shamir shares) ---------------- */
+    if (is_split_key) {
+        if (npos > 1) {
+            fprintf(stderr, "Error: split-key takes at most an output prefix\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (sss_threshold == 0 || sss_shares == 0 || sss_shares < sss_threshold) {
+            fprintf(stderr, "Error: split-key requires --threshold <t> and --shares <n> with n >= t\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 0, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        secret_blob = crypto_load_secret_key(config.secret_key_file, &secret_len, &config);
+        if (!secret_blob) {
+            fprintf(stderr, "Error: could not load secret key (wrong passphrase?)\n");
+            ret = CRYPTO_ERR_FILE_IO;
+            goto cleanup;
+        }
+        const char *prefix = positionals[0] ? positionals[0] : config.secret_key_file;
+        sss_status src = sss_split_to_files(secret_blob, secret_len,
+                                            sss_threshold, sss_shares, prefix);
+        if (src != SSS_OK) {
+            fprintf(stderr, "Error: split-key failed: %s\n", sss_strerror(src));
+            ret = CRYPTO_ERR_CRYPTO;
+            goto cleanup;
+        }
+        printf("Split %s into %u shares (any %u reconstruct it):\n",
+               config.secret_key_file, sss_shares, sss_threshold);
+        for (unsigned int i = 1; i <= sss_shares; i++) {
+            printf("  %s.share%u\n", prefix, i);
+        }
+        printf("Each share is UNENCRYPTED key material: store them separately\n");
+        printf("(any %u of them recover the key without a passphrase).\n", sss_threshold);
+        ret = CRYPTO_SUCCESS;
+        goto cleanup;
+    }
+
+    /* ---------------- join-key (reconstruct from shares) ---------------- */
+    if (is_join_key) {
+        if (npos < SSS_MIN_THRESHOLD) {
+            fprintf(stderr, "Error: join-key needs at least %d share files\n", SSS_MIN_THRESHOLD);
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        unsigned char *joined = NULL;
+        size_t joined_len = 0;
+        sss_status src = sss_join_files(positionals, (size_t)npos, &joined, &joined_len);
+        if (src != SSS_OK) {
+            fprintf(stderr, "Error: join-key failed: %s\n", sss_strerror(src));
+            ret = CRYPTO_ERR_CRYPTO;
+            goto cleanup;
+        }
+        secret_blob = joined;   /* cleansed+freed in cleanup */
+        secret_len = joined_len;
+        /* Re-wrap under a freshly confirmed passphrase (like keygen). */
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 1, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        if (crypto_save_secret_key(config.secret_key_file, secret_blob, secret_len, &config) != CRYPTO_SUCCESS) {
+            fprintf(stderr, "Error: failed to write reconstructed secret key\n");
+            ret = CRYPTO_ERR_FILE_IO;
+            goto cleanup;
+        }
+        printf("Reconstructed secret key -> %s (wrapped under the new passphrase)\n",
+               config.secret_key_file);
+        ret = CRYPTO_SUCCESS;
+        goto cleanup;
+    }
+
     /* ---------------- rekey ---------------- */
     if (is_rekey) {
         if (npos != 0) {
@@ -955,6 +1385,26 @@ int main(int argc, char *argv[]) {
     }
 
     size_t expect_pub = X25519_KEY_SIZE + kem->length_public_key;
+
+    char sign_pub_buf[MAX_PATH_LENGTH];
+    if (is_encrypt && sign_with) {
+        /* Embedded sender signature: the signing secret key needs its
+         * passphrase; the signer public key travels in the payload. */
+        config.sign_sk_file = sign_with;
+        if (snprintf(sign_pub_buf, sizeof(sign_pub_buf), "%s%s", sign_with, PUBLIC_KEY_SUFFIX)
+            >= (int)sizeof(sign_pub_buf)) {
+            fprintf(stderr, "Error: signing key path too long\n");
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+        config.sign_pk_file = sign_pub_buf;
+        /* The passphrase (and any keychain entry) belongs to the signing key. */
+        config.secret_key_file = sign_with;
+        if (resolve_passphrase(&config, cli_passphrase, passphrase_file, 0, passbuf, sizeof(passbuf)) != CRYPTO_SUCCESS) {
+            ret = CRYPTO_ERR_INVALID_INPUT;
+            goto cleanup;
+        }
+    }
 
     if (is_encrypt) {
         /* Recipients are the --recipient public keys, or the default key. */

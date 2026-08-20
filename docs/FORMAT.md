@@ -1,12 +1,15 @@
 # Qsafe On-Disk Format Specification
 
-Current write format: **QSAFE006** (framed AEAD) · Also readable: **QSAFE005** · Status: stable
+Current write format: **QSAFE007** (framed AEAD, extended metadata) · Also
+readable: **QSAFE006**, **QSAFE005** · Status: stable
 
-`qsafe encrypt` always writes QSAFE006. `qsafe decrypt` accepts both QSAFE006
-and QSAFE005, so files produced by Qsafe 5.0 are not stranded. The two formats
-share the header's recipient records, key wrap, metadata block, key files,
-signatures, and armor; they differ only in how the payload is laid out (§2 vs
-§2-legacy).
+`qsafe encrypt` always writes QSAFE007. `qsafe decrypt` accepts QSAFE007,
+QSAFE006 and QSAFE005, so files produced by Qsafe 5.0–7.0 are not stranded.
+The formats share the header's recipient records, key wrap, key files,
+signatures, and armor. QSAFE007 differs from QSAFE006 only inside the
+*encrypted* payload: a 16-byte-longer metadata block (§3) that enables an
+optional embedded sender signature (§3.1) and optional size-hiding padding
+(§3.2). QSAFE005 additionally differs in payload layout (§2-legacy).
 
 This document specifies the byte layout and cryptographic construction of every
 file Qsafe writes, precisely enough to build an interoperable implementation
@@ -43,18 +46,21 @@ Constants used throughout: `NONCE = 12`, `TAG = 16`, `KEY = 32`, `CEK = 32`,
 
 ---
 
-## 2. Encrypted file (`QSAFE005`)
+## 2. Encrypted file (`QSAFE007`)
 
 ### 2.1 Layout
 
 ```
 offset  size                       field
 ------  -------------------------  ---------------------------------
-0       8                          magic = "QSAFE006" (ASCII)
+0       8                          magic = "QSAFE007" (ASCII)
 8       1                          recipient_count R   (1..16)
 9       R * 1660                    recipient_record[0..R-1]  (see 2.2)
 9+RR    variable                   frame[0..k-1]        (see 2.3)
 ```
+
+A `QSAFE006` file is identical except for the magic and the 272-byte (§3-v6)
+metadata block inside the payload.
 
 `RR = R * 1660`. The **header** `H = magic ‖ recipient_count ‖ all
 recipient_records` (length `9 + RR`) is authenticated as AEAD Additional
@@ -80,7 +86,14 @@ Record size = `32 + 1568 + 12 + 32 + 16 = 1660`.
 
 ### 2.3 Cryptographic construction (encryption) — framed payload
 
-The payload `P = META ‖ file_contents` (§3 for META) is split into frames of
+The payload
+
+```
+P = META ‖ file_contents ‖ [SIG_TRAILER] ‖ [PADDING]
+```
+
+(§3 for META; the optional trailer §3.1 is present iff META flag bit 1 is set,
+the optional padding §3.2 iff bit 2 is set) is split into frames of
 `FRAME = 65536` plaintext bytes and each frame is sealed independently. This
 gives constant-memory streaming *and* per-frame verify-before-release.
 
@@ -142,8 +155,8 @@ Notes:
 ### 2.5 Decryption procedure (framed)
 
 ```
-1. Read magic(8). If "QSAFE006" -> framed (this section). If "QSAFE005" ->
-   legacy (§2-legacy). Otherwise reject.
+1. Read magic(8). If "QSAFE007" or "QSAFE006" -> framed (this section).
+   If "QSAFE005" -> legacy (§2-legacy). Otherwise reject.
 2. Read R = u8; reject if R == 0 or R > 16.
 3. Read R recipient records (R * 1660 bytes); reject if truncated.
 4. Recover CEK from whichever record is ours (§2.6); reject if none.
@@ -159,7 +172,10 @@ Notes:
      if Open fails -> reject (corrupt / wrong key / reordered / wrong final flag)
      release pt_c     # already authenticated
      if last: stop.
-6. The first 272 released plaintext bytes are META (§3); the rest is the file.
+6. The first 288 (QSAFE007) or 272 (QSAFE006) released plaintext bytes are
+   META (§3); the rest is the file contents, followed — in QSAFE007 — by the
+   optional signature trailer (§3.1) and padding (§3.2), split per META's
+   declarations and checked per §3's consistency rules.
 ```
 
 Because each frame is authenticated *before* its plaintext is released, a pipe
@@ -211,26 +227,81 @@ Key wrap (§2.4) and unwrap (§2.6) are identical.
 
 ---
 
-## 3. Metadata block (`META`, 272 bytes)
+## 3. Metadata block (`META`, 288 bytes in QSAFE007)
 
 Prepended to the plaintext before payload encryption; little-endian.
 
 ```
 offset  size    field
 ------  ------  ----------------------------------------
-0       1       flags        (bit 0 = metadata present)
+0       1       flags        (bit 0 = metadata present,
+                              bit 1 = signature trailer present,
+                              bit 2 = padding present)
 1       1       reserved     (0)
 2       2       name_len     (u16, <= 255)
 4       256     name         (name_len valid bytes; remainder 0)
 260     4       mode         (u32, st_mode & 0o777)
 264     8       mtime        (u64, seconds since Unix epoch)
+272     8       content_len  (u64; 0xFFFF…FF = unknown / streamed input)
+280     8       pad_len      (u64, bytes of PADDING at the end of P)
 ```
 
-Total `1 + 1 + 2 + 256 + 4 + 8 = 272`.
+Total `272 + 8 + 8 = 288`. **§3-v6:** in QSAFE006 and QSAFE005 the block ends
+at offset 272 (no `content_len`/`pad_len`, flag bits 1–2 undefined).
+
+Consistency rules a reader MUST enforce:
+- bit 2 set requires `content_len != unknown` and `pad_len > 0`;
+  bit 2 clear requires `pad_len == 0`.
+- When `content_len` is known, the plaintext stream `P` MUST be exactly
+  `288 + content_len + (bit1 ? 7221 : 0) + pad_len` bytes; any mismatch MUST
+  be rejected.
+- When `content_len` is unknown and bit 1 is set, `P` MUST be at least
+  `288 + 7221` bytes and the trailer is the final 7221 bytes.
 
 On decryption, `name` MUST be reduced to its final path component and a value of
 `".."` MUST be discarded (directory-traversal defense). When `flags` bit 0 is
 clear (e.g. data came from stdin), no name/mode/mtime are restored.
+
+### 3.1 Embedded sender signature (`SIG_TRAILER`, 7221 bytes)
+
+With `--sign-with`, the encryptor appends a fixed-size trailer after the file
+contents, *inside* the encrypted payload (so the signer's identity is hidden
+from anyone who cannot decrypt):
+
+```
+offset  size    field
+------  ------  ----------------------------------------
+0       2592    signer_pub    (raw ML-DSA-87 public key)
+2592    2       sig_len       (u16, 1..4627)
+2594    4627    signature     (sig_len valid bytes; remainder 0)
+```
+
+The signature is computed over the SHA-256 digest
+
+```
+digest = SHA-256("qsafe-v7-signed" ‖ H ‖ META ‖ file_contents)
+```
+
+where `H` is the container header (§2.1) — binding the signature to the exact
+recipient set — and the ASCII context string provides domain separation from
+detached signatures (§6). A reader MUST verify the signature whenever META flag
+bit 1 is set and MUST reject the file if verification fails. The reader SHOULD
+surface the signer (e.g. its SHA-256 fingerprint) and MAY additionally require
+`signer_pub` to equal a caller-pinned key (`--signer`).
+
+Note the trailer is itself covered by the payload AEAD, so an attacker without
+a recipient key can neither strip nor substitute it. A *recipient* can re-encrypt
+the contents without a signature, but cannot forge the original signer's
+signature over new contents or a new recipient set.
+
+### 3.2 Size-hiding padding (`PADDING`)
+
+With `--pad`, `pad_len` random bytes are appended as the final section of `P`,
+where `content_len + pad_len` is the [Padmé](https://petsymposium.org/2019/files/papers/issue4/popets-2019-0056.pdf)
+bucket of `content_len`: with `E = ⌊log2 L⌋` and `S = ⌊log2 E⌋ + 1`, `L` is
+rounded up to the next multiple of `2^(E-S)` (overhead ≤ ~12%, leaking only
+`O(log log L)` bits of the true length). Padding bytes are random and MUST be
+discarded by the reader. Padding requires a known `content_len`.
 
 ---
 
@@ -356,13 +427,48 @@ For an encryption identity this is over the 1600-byte hybrid public blob (§4.1)
 
 ## 9. Versioning and compatibility
 
-- The 8-byte magic identifies the format: `QSAFE006` (current, framed) and
+- The 8-byte magic identifies the format: `QSAFE007` (current), `QSAFE006` and
   `QSAFE005` (legacy, still readable) for files; `QSAFEK01` for secret-key
   files. A reader MUST reject an unrecognized magic.
-- `qsafe encrypt` writes `QSAFE006`; `qsafe decrypt` accepts `QSAFE006` and
-  `QSAFE005`. Both are intentionally incompatible with `QSAFE004` and earlier.
+- `qsafe encrypt` writes `QSAFE007`; `qsafe decrypt` accepts `QSAFE007`,
+  `QSAFE006` and `QSAFE005`. All are intentionally incompatible with
+  `QSAFE004` and earlier.
 - Any change to a layout or construction in this document is a breaking change
   and MUST bump the corresponding magic. (`QSAFE006` added framing over
-  `QSAFE005` to gain constant-memory verify-before-release.)
+  `QSAFE005` to gain constant-memory verify-before-release; `QSAFE007`
+  extended META to carry the embedded-signature and padding declarations.)
 - Known-answer vectors for the deterministic primitives (SHA-256 fingerprint,
   HKDF-SHA256, scrypt) are in `tests/test_crypto_utils.c`.
+
+---
+
+## 10. Test vectors (QSAFE007 — frozen)
+
+The QSAFE007 layout in this document is **frozen**: any further change bumps
+the magic. An independent implementation can validate against:
+
+**Deterministic KATs** (also asserted in `tests/test_crypto_utils.c`; expected
+values generated with an independent implementation):
+
+- *Hybrid KEK derivation* (§2.4): `HKDF-SHA256(ikm = bytes 00..3f, salt =
+  empty, info = "qsafe-v5-hybrid-kek", L = 32)` =
+  `7aab3a9ddd6d0281ba8f369761dfa471a1ceba8870d9ace9b2852f47ac3e0dd5`
+- *Frame AEAD* (§2.3): AES-256-GCM with `key = bytes 00..1f`,
+  `nonce = frame_nonce(counter 0, final)` = `00·00·00 ‖ u64be(0) ‖ 01`,
+  `aad = "HDR"`, `plaintext = "Qsafe frame KAT"` (15 bytes) →
+  `ciphertext ‖ tag` =
+  `44a5de9a21d4566c6f433419a7e76ed434e897d9f04eb6cf5bf90a7d8a48de`
+- *Padmé buckets* (§3.2): `padme(9) = 10`, `padme(100) = 104`,
+  `padme(1000) = 1024`, `padme(100000) = 100352`,
+  `padme(123456789) = 123731968`; identities at 0–3 and exact powers of two.
+- *age plugin KEK* (`age-plugin-qsafe`): as the first vector but with
+  `info = "qsafe-age-plugin-v1"` =
+  `1d20ee062874f2f8e2b0076127f31a7ca924a80082ec31d4ef1b3f21dfa7bfea`
+
+**Frozen container fixtures** (`tests/fixtures/`, passphrase
+`v7-fixture-pass`): `v7_msg.qsafe` (plain), `v7_msg_signed.qsafe` (embedded
+ML-DSA-87 signature, signer `v7_sign_key.pub`), `v7_msg_padded.qsafe`
+(Padmé-padded); all decrypt with `v7_key` to `v7_msg.expected`. The
+randomized layers (KEM encapsulation, ephemeral X25519, wrap nonces) make a
+fully deterministic whole-file KAT impossible — the fixtures pin the reader,
+the KATs above pin every deterministic construction.

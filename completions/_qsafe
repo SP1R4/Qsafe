@@ -15,6 +15,14 @@ _qsafe() {
         'sign-keygen:Generate an ML-DSA-87 signing keypair'
         'sign:Create a detached signature for a file'
         'verify-sig:Verify a detached signature against a file'
+        'keys:Manage the keyring (list/path/import/remove)'
+        'split-key:Split the secret key into Shamir shares'
+        'join-key:Reconstruct a secret key from shares'
+        'vault:Deniable hidden-volume containers'
+        'secrets:Encrypted key-value credential store'
+        'age-keygen:Generate an age (X25519) keypair'
+        'age-encrypt:Encrypt to age recipients (classical interop)'
+        'age-decrypt:Decrypt an age file'
         'help:Show usage'
         'version:Show version'
     )
@@ -27,18 +35,63 @@ _qsafe() {
         '--passphrase-file[Read passphrase from file]:file:_files' \
         '--check[Authenticate only; write nothing]' \
         '--armor[Base64 text input/output]' \
+        '--sign-with[Embed an ML-DSA-87 sender signature]:signing key:_files' \
+        '--signer[Require this embedded signer key]:public key:_files' \
+        '--pad[Hide the exact file size (Padmé padding)]' \
+        '--threshold[split-key: shares needed to reconstruct]:threshold:(2 3 4 5)' \
+        '--shares[split-key: total shares to create]:shares:(3 4 5 6 7)' \
+        '--identity[Keyring identity name]:name:' \
+        '*'{-i,--identity-file}'[age identity file]:file:_files' \
+        '--keychain[Store/derive the passphrase in the OS keychain]' \
         '--scrypt-cost[scrypt cost log2(N)]:cost:(14 15 16 17 18 19 20 21 22)' \
+        '--size[vault init/create: container size in bytes]:bytes:' \
+        '--offset[vault slot offset (add: optional)]:bytes:' \
+        '--capacity[vault slot capacity (add: optional)]:bytes:' \
+        '--name[vault add/extract/rm: slot name]:name:' \
+        '*--keep[vault: also preserve this volume]:passphrase file:_files' \
+        '--keyfile[vault v2: second-factor keyfile]:file:_files' \
+        '--new-passphrase-file[vault passwd: new passphrase file]:file:_files' \
+        '--argon2[vault v2: use Argon2id instead of scrypt]' \
+        '--store[secrets: store file path]:file:_files' \
         '--verbose[Verbose output]' \
         '--force[Overwrite without prompting]' \
         '--help[Show usage]' \
         '--version[Show version]' \
         '1: :->command' \
+        '2: :->vaultsub' \
         '*: :_files' \
         && return 0
 
     case "$state" in
         command)
             _describe -t commands 'qsafe command' commands
+            ;;
+        vaultsub)
+            if [[ "${words[2]}" == vault ]]; then
+                local -a subs
+                subs=(
+                    'init:Create a raw container (low-level)'
+                    'write:Seal a slot at an explicit offset/capacity'
+                    'read:Recover a slot at an explicit offset/capacity'
+                    'footprint:Print a slot'\''s on-disk size'
+                    'create:Create a passphrase-addressed volume (v2)'
+                    'add:Add a file as a named slot (auto-placed)'
+                    'ls:List the opened volume'\''s slots'
+                    'extract:Recover a named slot'
+                    'rm:Remove a named slot'
+                    'passwd:Change a volume'\''s passphrase'
+                )
+                _describe -t vaultsub 'vault subcommand' subs
+            elif [[ "${words[2]}" == secrets ]]; then
+                local -a ssubs
+                ssubs=(
+                    'set:Store a value (from stdin) under a key'
+                    'get:Write a key'\''s value to stdout'
+                    'list:List key names'
+                    'rm:Remove a key'
+                )
+                _describe -t secretssub 'secrets subcommand' ssubs
+            fi
             ;;
     esac
 }
