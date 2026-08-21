@@ -215,11 +215,15 @@ crypto_error_t pqxdh_initiator(const pqxdh_identity_t *self, const pqxdh_bundle_
     if ((rc = crypto_x25519_keypair(ek_sk, ek_pk)) != CRYPTO_SUCCESS) goto out;
 
     /* DH1=DH(IK_A,SPK_B) DH2=DH(EK_A,IK_B) DH3=DH(EK_A,SPK_B) [DH4=DH(EK_A,OPK_B)] */
-    if ((rc = crypto_x25519_dh(self->ik_dh_sk, peer->spk_pk, legs + off)) != CRYPTO_SUCCESS) goto out; off += X25519_KEY_SIZE;
-    if ((rc = crypto_x25519_dh(ek_sk, peer->ik_dh_pk, legs + off)) != CRYPTO_SUCCESS) goto out;      off += X25519_KEY_SIZE;
-    if ((rc = crypto_x25519_dh(ek_sk, peer->spk_pk, legs + off)) != CRYPTO_SUCCESS) goto out;         off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(self->ik_dh_sk, peer->spk_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(ek_sk, peer->ik_dh_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(ek_sk, peer->spk_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
     if (peer->have_opk) {
-        if ((rc = crypto_x25519_dh(ek_sk, peer->opk_pk, legs + off)) != CRYPTO_SUCCESS) goto out;     off += X25519_KEY_SIZE;
+        if ((rc = crypto_x25519_dh(ek_sk, peer->opk_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+        off += X25519_KEY_SIZE;
     }
 
     kem = kem_new();
@@ -283,9 +287,12 @@ crypto_error_t pqxdh_responder(const pqxdh_identity_t *self, const pqxdh_initial
     OQS_KEM *kem = NULL;
     size_t off = 0;
 
-    if ((rc = crypto_x25519_dh(self->spk_sk, msg->ik_dh_pk, legs + off)) != CRYPTO_SUCCESS) goto out; off += X25519_KEY_SIZE;
-    if ((rc = crypto_x25519_dh(self->ik_dh_sk, msg->ek_pk, legs + off)) != CRYPTO_SUCCESS) goto out;  off += X25519_KEY_SIZE;
-    if ((rc = crypto_x25519_dh(self->spk_sk, msg->ek_pk, legs + off)) != CRYPTO_SUCCESS) goto out;    off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(self->spk_sk, msg->ik_dh_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(self->ik_dh_sk, msg->ek_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
+    if ((rc = crypto_x25519_dh(self->spk_sk, msg->ek_pk, legs + off)) != CRYPTO_SUCCESS) goto out;
+    off += X25519_KEY_SIZE;
     if (msg->opk_id >= 0) {
         int found = -1;
         for (uint32_t i = 0; i < self->n_opk; i++)

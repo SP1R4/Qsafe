@@ -33,12 +33,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: liboqs-install
-          key: liboqs-0.12.0-${{ runner.os }}
+          key: liboqs-0.15.0-${{ runner.os }}
 
       - name: Build liboqs
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git
+          git clone --depth 1 --branch 0.15.0 https://github.com/open-quantum-safe/liboqs.git
           cmake -S liboqs -B liboqs/build -GNinja \
             -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/liboqs-install"

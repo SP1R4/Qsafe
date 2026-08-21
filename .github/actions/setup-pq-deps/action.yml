@@ -12,7 +12,7 @@ inputs:
     default: "3.3.2"
   liboqs-version:
     description: liboqs git tag to build
-    default: "0.12.0"
+    default: "0.15.0"
   prefix:
     description: Install prefix for both libraries
     default: /home/runner/pqdeps
@@ -30,7 +30,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ inputs.prefix }}
-        key: pqdeps-${{ runner.os }}-openssl${{ inputs.openssl-version }}-liboqs${{ inputs.liboqs-version }}
+        key: pqdeps-${{ runner.os }}-openssl${{ inputs.openssl-version }}-liboqs${{ inputs.liboqs-version }}-libdir2
 
     - name: Build OpenSSL + liboqs from source
       if: steps.cache.outputs.cache-hit != 'true'
@@ -50,7 +50,12 @@ runs:
         curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl.tgz
         tar xf openssl.tgz
         cd "openssl-${OPENSSL_VERSION}"
-        ./Configure --prefix="$PQPREFIX" --openssldir="$PQPREFIX/ssl" shared no-tests
+        # --libdir=lib pins the install dir to lib/ (OpenSSL otherwise picks
+        # lib64/ on many x86-64 distros); consumers point -L/-rpath at
+        # <prefix>/lib, so without this the built libcrypto lands in lib64/, the
+        # loader falls back to the system OpenSSL 3.0, and Argon2 (3.2+) fetches
+        # fail as "unsupported" at runtime.
+        ./Configure --prefix="$PQPREFIX" --openssldir="$PQPREFIX/ssl" --libdir=lib shared no-tests
         make -j"$(nproc)"
         make install_sw
         cd /tmp/pqbuild
@@ -59,6 +64,7 @@ runs:
         git clone --depth 1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs
         cmake -S liboqs -B liboqs/build \
           -DCMAKE_INSTALL_PREFIX="$PQPREFIX" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
           -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_SHARED_LIBS=ON \
           -DOQS_BUILD_ONLY_LIB=ON

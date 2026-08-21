@@ -46,7 +46,7 @@ jobs:
             git clone --depth 1 --branch openssl-3.3.1 https://github.com/openssl/openssl.git /tmp/openssl &&
             (cd /tmp/openssl && ./Configure --prefix=/usr/local --libdir=lib no-shared no-tests &&
              make -j"$(nproc)" && make install_dev) &&
-            git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs &&
+            git clone --depth 1 --branch 0.15.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs &&
             cmake -S /tmp/liboqs -B /tmp/liboqs/build -GNinja
             -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON -DOQS_USE_OPENSSL=OFF
             -DCMAKE_INSTALL_PREFIX=/usr/local &&
