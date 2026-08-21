@@ -12,7 +12,7 @@ inputs:
     default: "3.3.2"
   liboqs-version:
     description: liboqs git tag to build
-    default: "0.12.0"
+    default: "0.15.0"
   prefix:
     description: Install prefix for both libraries
     default: /home/runner/pqdeps
